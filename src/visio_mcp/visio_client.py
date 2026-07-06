@@ -1,0 +1,606 @@
+"""VisioClient: every COM call in the codebase lives in this module.
+
+Rules that keep this correct:
+- All methods are called on the ComWorker's STA thread (see runtime.py).
+- Methods return plain dicts/lists only — COM proxies must never escape.
+- win32com is imported lazily inside the default app factory, so this module
+  imports fine on macOS and tests inject a FakeVisio app factory instead.
+- COM collections are 1-based and iterated explicitly via Count/Item so a
+  duck-typed fake works without implementing COM enumerators.
+"""
+
+from __future__ import annotations
+
+import difflib
+import glob
+import os
+import sys
+from typing import Any, Callable, Optional
+
+from . import constants as C
+from .errors import VisioMcpError, hresult_of, translate_com_error
+from .models import DropSpec, hex_to_rgb_formula
+
+_CONTROL_CHARS = dict.fromkeys(i for i in range(32) if i not in (9, 10, 13))
+
+
+def _clean_text(raw: Any) -> str:
+    """Visio shape text can embed field-escape control chars; strip them."""
+    return str(raw).translate(_CONTROL_CHARS) if raw else ""
+
+
+def _is_com_error(exc: BaseException) -> bool:
+    return type(exc).__name__ == "com_error"
+
+
+def _items(collection):
+    """Iterate a 1-based COM collection via Count/Item."""
+    for i in range(1, int(collection.Count) + 1):
+        yield collection.Item(i)
+
+
+def default_app_factory():
+    """Attach to a running Visio instance, or launch a new visible one."""
+    if sys.platform != "win32":
+        raise VisioMcpError(
+            "This server drives Microsoft Visio via COM and must run on Windows "
+            "with Visio desktop installed. It cannot control Visio from "
+            f"{sys.platform!r}."
+        )
+    import win32com.client  # noqa: PLC0415 — Windows-only import by design
+
+    try:
+        return win32com.client.GetActiveObject("Visio.Application")
+    except Exception as exc:
+        if not _is_com_error(exc) or hresult_of(exc) != C.MK_E_UNAVAILABLE:
+            raise translate_com_error(exc, "attaching to Visio") from exc
+    try:
+        return win32com.client.DispatchEx("Visio.Application")
+    except Exception as exc:
+        if _is_com_error(exc):
+            raise translate_com_error(exc, "launching Visio") from exc
+        raise
+
+
+class VisioClient:
+    def __init__(self, app_factory: Optional[Callable[[], Any]] = None):
+        self._app_factory = app_factory or default_app_factory
+        self._app_obj: Any = None
+
+    # -- plumbing -----------------------------------------------------------
+
+    def release(self) -> None:
+        """Drop COM references. Never quits Visio — the user keeps their app."""
+        self._app_obj = None
+
+    def _app(self):
+        if self._app_obj is not None:
+            try:
+                _ = self._app_obj.Version  # liveness probe: user may have quit Visio
+            except Exception:
+                self._app_obj = None
+        if self._app_obj is None:
+            app = self._app_factory()
+            app.Visible = True
+            try:
+                # 7 = IDNO: auto-answer modal prompts so COM calls never hang
+                app.AlertResponse = 7
+            except Exception:
+                pass
+            self._app_obj = app
+        return self._app_obj
+
+    def _guard(self, context: str, fn: Callable[[], Any]) -> Any:
+        """Run fn, translating com_error into an actionable VisioMcpError."""
+        try:
+            return fn()
+        except VisioMcpError:
+            raise
+        except Exception as exc:
+            if _is_com_error(exc):
+                raise translate_com_error(exc, context) from exc
+            raise
+
+    def _drawing_doc(self):
+        app = self._app()
+        doc = None
+        try:
+            doc = app.ActiveDocument
+        except Exception:
+            doc = None
+        if doc is not None and int(doc.Type) == C.VIS_TYPE_DRAWING:
+            return doc
+        for d in _items(app.Documents):
+            if int(d.Type) == C.VIS_TYPE_DRAWING:
+                return d
+        raise VisioMcpError(
+            "No drawing document is open in Visio — call create_document or "
+            "open_document first."
+        )
+
+    def _page(self, page_name: Optional[str] = None):
+        app = self._app()
+        doc = self._drawing_doc()
+        if page_name is None:
+            try:
+                page = app.ActivePage
+                if page is not None:
+                    return page
+            except Exception:
+                pass
+            return doc.Pages.Item(1)
+        for p in _items(doc.Pages):
+            if str(p.Name) == page_name or str(p.NameU) == page_name:
+                return p
+        names = [str(p.Name) for p in _items(doc.Pages)]
+        raise VisioMcpError(f"No page named {page_name!r}. Pages: {names}")
+
+    def _shape_by_id(self, page, shape_id: int):
+        try:
+            return page.Shapes.ItemFromID(int(shape_id))
+        except Exception:
+            raise VisioMcpError(
+                f"Shape {shape_id} not found on page {str(page.Name)!r} — call "
+                "get_page_state to list current shape ids."
+            ) from None
+
+    def _stencil_docs(self) -> list:
+        app = self._app()
+        return [d for d in _items(app.Documents) if int(d.Type) == C.VIS_TYPE_STENCIL]
+
+    # -- status / documents --------------------------------------------------
+
+    def status(self) -> dict:
+        app = self._app()
+        docs, stencils = [], []
+        for d in _items(app.Documents):
+            entry = {"name": str(d.Name), "path": str(d.FullName)}
+            if int(d.Type) == C.VIS_TYPE_STENCIL:
+                stencils.append(entry)
+            else:
+                docs.append(entry)
+        active_doc = active_page = None
+        try:
+            if app.ActiveDocument is not None:
+                active_doc = str(app.ActiveDocument.Name)
+            if app.ActivePage is not None:
+                active_page = str(app.ActivePage.Name)
+        except Exception:
+            pass
+        return {
+            "visio_version": str(app.Version),
+            "documents": docs,
+            "stencils": stencils,
+            "active_document": active_doc,
+            "active_page": active_page,
+            "my_shapes_path": str(app.MyShapesPath),
+        }
+
+    def create_document(self, template: Optional[str] = None, measurement: str = "us") -> dict:
+        app = self._app()
+        name = template or ""
+        if name and "." not in os.path.basename(name):
+            # bare family name like 'BASFLO' -> BASFLO_U.VSTX / BASFLO_M.VSTX
+            name = f"{name}_{'M' if measurement == 'metric' else 'U'}.VSTX"
+
+        def _add():
+            return app.Documents.Add(name)
+
+        doc = self._guard(
+            f"creating document from template {name!r}" if name else "creating blank document",
+            _add,
+        )
+        return {
+            "document": str(doc.Name),
+            "pages": [str(p.Name) for p in _items(doc.Pages)],
+            "note": "Coordinates are in inches, origin at the page bottom-left; "
+                    "drop point is the shape center.",
+        }
+
+    def open_document(self, path: str) -> dict:
+        app = self._app()
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.exists(abs_path):
+            raise VisioMcpError(f"File not found: {abs_path}")
+        doc = self._guard(f"opening {abs_path}", lambda: app.Documents.Open(abs_path))
+        return {
+            "document": str(doc.Name),
+            "path": str(doc.FullName),
+            "pages": [str(p.Name) for p in _items(doc.Pages)],
+            "note": "Call get_page_state to learn the shape ids on each page.",
+        }
+
+    def save_document(self, path: Optional[str] = None) -> dict:
+        doc = self._drawing_doc()
+        if path is None:
+            existing = str(doc.Path or "")
+            if not existing:
+                raise VisioMcpError(
+                    "This document has never been saved — pass an absolute file "
+                    "path ending in .vsdx to save_document."
+                )
+            self._guard("saving document", doc.Save)
+            return {"path": str(doc.FullName)}
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        if not abs_path.lower().endswith((".vsdx", ".vsdm", ".vsd")):
+            abs_path += ".vsdx"
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        self._guard(f"saving document to {abs_path}", lambda: doc.SaveAs(abs_path))
+        return {"path": str(doc.FullName)}
+
+    def export_page_png(self, path: str, page_name: Optional[str] = None) -> dict:
+        page = self._page(page_name)
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        if not abs_path.lower().endswith(".png"):
+            abs_path += ".png"
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        self._guard(f"exporting page to {abs_path}", lambda: page.Export(abs_path))
+        if not os.path.exists(abs_path):
+            raise VisioMcpError(f"Visio reported success but no file was written at {abs_path}")
+        return {"path": abs_path, "page": str(page.Name)}
+
+    # -- stencils / masters ---------------------------------------------------
+
+    def open_stencil(self, name_or_path: str) -> dict:
+        app = self._app()
+        query = name_or_path.strip()
+        candidates: list[str] = []
+        if os.path.isabs(query):
+            candidates.append(query)
+        else:
+            candidates.append(query)  # Visio resolves bare names via its search paths
+            my_shapes = str(app.MyShapesPath)
+            candidates.append(os.path.join(my_shapes, query))
+            if "." not in os.path.basename(query):
+                candidates.append(os.path.join(my_shapes, query + ".vssx"))
+                candidates.append(os.path.join(my_shapes, query + ".vss"))
+            # last resort: fuzzy filename match anywhere under My Shapes
+            for ext in ("vssx", "vss"):
+                for hit in sorted(glob.glob(os.path.join(my_shapes, "**", f"*.{ext}"), recursive=True)):
+                    if query.lower() in os.path.basename(hit).lower():
+                        candidates.append(hit)
+
+        errors: list[str] = []
+        for cand in candidates:
+            try:
+                doc = app.Documents.OpenEx(cand, C.STENCIL_OPEN_FLAGS)
+                return {
+                    "stencil": str(doc.Name),
+                    "path": str(doc.FullName),
+                    "master_count": int(doc.Masters.Count),
+                    "note": "Use find_masters to list its shapes.",
+                }
+            except Exception as exc:
+                errors.append(f"{cand}: {exc}")
+        raise VisioMcpError(
+            f"Could not open a stencil matching {name_or_path!r}. Tried Visio's "
+            f"search paths and {str(app.MyShapesPath)!r}. If this is an Azure/AWS "
+            "stencil pack, download it and unzip into the My Shapes folder first. "
+            f"Attempts: {errors[:3]}"
+        )
+
+    def _master_sources(self) -> list[tuple[str, Any]]:
+        """(source_name, masters_collection) for all open stencils + the doc itself."""
+        sources = [(str(d.Name), d.Masters) for d in self._stencil_docs()]
+        try:
+            doc = self._drawing_doc()
+            sources.append((f"(document) {doc.Name}", doc.Masters))
+        except VisioMcpError:
+            pass
+        return sources
+
+    def find_masters(self, query: Optional[str] = None, stencil: Optional[str] = None) -> dict:
+        sources = self._master_sources()
+        if stencil is not None:
+            sources = [s for s in sources if stencil.lower() in s[0].lower()]
+            if not sources:
+                raise VisioMcpError(
+                    f"No open stencil matches {stencil!r} — call open_stencil first, "
+                    "or omit the stencil argument to search all open stencils."
+                )
+        total_masters = sum(int(m.Count) for _, m in sources)
+        if total_masters == 0:
+            raise VisioMcpError(
+                "No stencils are open — call open_stencil first (e.g. "
+                "open_stencil('BASFLO_U.VSSX') for basic flowchart shapes)."
+            )
+        rows = []
+        q = (query or "").lower()
+        for source_name, masters in sources:
+            for m in _items(masters):
+                name = str(m.Name)
+                if q and q not in name.lower():
+                    continue
+                rows.append({"master": name, "stencil": source_name})
+                if len(rows) >= 100:
+                    return {"masters": rows, "truncated": True}
+        return {"masters": rows, "truncated": False}
+
+    def _find_master(self, master: str, stencil: Optional[str] = None):
+        sources = self._master_sources()
+        if stencil is not None:
+            sources = [s for s in sources if stencil.lower() in s[0].lower()]
+        all_names: list[str] = []
+        substring_hits = []
+        for _, masters in sources:
+            for m in _items(masters):
+                name = str(m.Name)
+                all_names.append(name)
+                if name.lower() == master.lower():
+                    return m
+                if master.lower() in name.lower():
+                    substring_hits.append(m)
+        if len(substring_hits) == 1:
+            return substring_hits[0]
+        if len(substring_hits) > 1:
+            names = sorted({str(m.Name) for m in substring_hits})[:8]
+            raise VisioMcpError(
+                f"Master {master!r} is ambiguous — matches {names}. Use the exact name."
+            )
+        suggestions = difflib.get_close_matches(master, all_names, n=5, cutoff=0.4)
+        hint = f" Closest matches: {suggestions}." if suggestions else ""
+        raise VisioMcpError(
+            f"No master named {master!r} found in the open stencils.{hint} "
+            "Call find_masters to browse, or open_stencil to load the stencil "
+            "that contains it."
+        )
+
+    # -- shapes ---------------------------------------------------------------
+
+    def _shape_info(self, shape) -> dict:
+        return {
+            "shape_id": int(shape.ID),
+            "name": str(shape.NameU),
+            "x": round(float(shape.CellsU("PinX").ResultIU), 4),
+            "y": round(float(shape.CellsU("PinY").ResultIU), 4),
+            "width_in": round(float(shape.CellsU("Width").ResultIU), 4),
+            "height_in": round(float(shape.CellsU("Height").ResultIU), 4),
+            "text": _clean_text(shape.Text),
+        }
+
+    def drop_shapes(self, specs: list[dict], page_name: Optional[str] = None) -> dict:
+        app = self._app()
+        page = self._page(page_name)
+        parsed = [DropSpec.model_validate(s) for s in specs]
+        results = []
+        scope = self._guard("starting undo scope", lambda: app.BeginUndoScope("Drop shapes"))
+        try:
+            for spec in parsed:
+                m = self._find_master(spec.master, spec.stencil)
+                shape = self._guard(
+                    f"dropping master {spec.master!r}",
+                    lambda m=m, s=spec: page.Drop(m, s.x, s.y),
+                )
+                if spec.width_in is not None:
+                    shape.CellsU("Width").ResultIU = spec.width_in
+                if spec.height_in is not None:
+                    shape.CellsU("Height").ResultIU = spec.height_in
+                if spec.text is not None:
+                    shape.Text = spec.text
+                results.append({**self._shape_info(shape), "master": str(m.Name)})
+            self._guard("closing undo scope", lambda: app.EndUndoScope(scope, True))
+        except Exception:
+            try:
+                app.EndUndoScope(scope, False)
+            except Exception:
+                pass
+            raise
+        return {"page": str(page.Name), "shapes": results}
+
+    def update_shape(
+        self,
+        shape_id: int,
+        page_name: Optional[str] = None,
+        text: Optional[str] = None,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        width_in: Optional[float] = None,
+        height_in: Optional[float] = None,
+    ) -> dict:
+        page = self._page(page_name)
+        shape = self._shape_by_id(page, shape_id)
+
+        def _apply():
+            if text is not None:
+                shape.Text = text
+            if x is not None:
+                shape.CellsU("PinX").ResultIU = x
+            if y is not None:
+                shape.CellsU("PinY").ResultIU = y
+            if width_in is not None:
+                shape.CellsU("Width").ResultIU = width_in
+            if height_in is not None:
+                shape.CellsU("Height").ResultIU = height_in
+
+        self._guard(f"updating shape {shape_id}", _apply)
+        return self._shape_info(shape)
+
+    def style_shape(
+        self,
+        shape_id: int,
+        page_name: Optional[str] = None,
+        fill_color: Optional[str] = None,
+        line_color: Optional[str] = None,
+        text_color: Optional[str] = None,
+        line_weight_pt: Optional[float] = None,
+        font_size_pt: Optional[float] = None,
+        bold: Optional[bool] = None,
+    ) -> dict:
+        page = self._page(page_name)
+        shape = self._shape_by_id(page, shape_id)
+
+        def _apply():
+            if fill_color is not None:
+                shape.CellsU("FillForegnd").FormulaU = hex_to_rgb_formula(fill_color)
+            if line_color is not None:
+                shape.CellsU("LineColor").FormulaU = hex_to_rgb_formula(line_color)
+            if text_color is not None:
+                shape.CellsU("Char.Color").FormulaU = hex_to_rgb_formula(text_color)
+            if line_weight_pt is not None:
+                shape.CellsU("LineWeight").FormulaU = f"{line_weight_pt} pt"
+            if font_size_pt is not None:
+                shape.CellsU("Char.Size").FormulaU = f"{font_size_pt} pt"
+            if bold is not None:
+                cell = shape.CellsU("Char.Style")
+                current = int(cell.ResultIU)
+                cell.ResultIU = (current | 1) if bold else (current & ~1)
+
+        self._guard(f"styling shape {shape_id}", _apply)
+        return {"shape_id": int(shape.ID), "styled": True}
+
+    def delete_shapes(self, shape_ids: list[int], page_name: Optional[str] = None) -> dict:
+        page = self._page(page_name)
+        for sid in shape_ids:
+            shape = self._shape_by_id(page, sid)
+            self._guard(f"deleting shape {sid}", shape.Delete)
+        return {"deleted": len(shape_ids)}
+
+    # -- connectors -----------------------------------------------------------
+
+    def connect_shapes(
+        self,
+        from_id: int,
+        to_id: int,
+        label: Optional[str] = None,
+        route: str = "right_angle",
+        end_arrow: bool = True,
+        begin_arrow: bool = False,
+        page_name: Optional[str] = None,
+    ) -> dict:
+        if route not in C.CONNECTOR_ROUTES:
+            raise VisioMcpError(
+                f"route must be one of {sorted(C.CONNECTOR_ROUTES)}, got {route!r}"
+            )
+        app = self._app()
+        page = self._page(page_name)
+        shape_from = self._shape_by_id(page, from_id)
+        shape_to = self._shape_by_id(page, to_id)
+
+        def _connect():
+            conn = page.Drop(app.ConnectorToolDataObject, 0.0, 0.0)
+            # Gluing to PinX = dynamic glue: Visio picks the best sides and
+            # re-routes as the layout changes.
+            conn.CellsU("BeginX").GlueTo(shape_from.CellsU("PinX"))
+            conn.CellsU("EndX").GlueTo(shape_to.CellsU("PinX"))
+            route_style, route_ext = C.CONNECTOR_ROUTES[route]
+            conn.CellsU("ShapeRouteStyle").ResultIU = route_style
+            conn.CellsU("ConLineRouteExt").ResultIU = route_ext
+            conn.CellsU("EndArrow").FormulaU = str(
+                C.ARROW_FILLED_TRIANGLE if end_arrow else C.ARROW_NONE
+            )
+            conn.CellsU("BeginArrow").FormulaU = str(
+                C.ARROW_FILLED_TRIANGLE if begin_arrow else C.ARROW_NONE
+            )
+            if label:
+                conn.Text = label
+            return conn
+
+        conn = self._guard(f"connecting shape {from_id} -> {to_id}", _connect)
+        return {
+            "connector_id": int(conn.ID),
+            "from_id": from_id,
+            "to_id": to_id,
+            "route": route,
+        }
+
+    # -- pages ----------------------------------------------------------------
+
+    def pages(self, action: str, name: Optional[str] = None) -> dict:
+        app = self._app()
+        doc = self._drawing_doc()
+        if action == "list":
+            active = None
+            try:
+                active = str(app.ActivePage.Name) if app.ActivePage is not None else None
+            except Exception:
+                pass
+            return {
+                "pages": [
+                    {"name": str(p.Name), "index": int(p.Index), "active": str(p.Name) == active}
+                    for p in _items(doc.Pages)
+                ]
+            }
+        if action == "add":
+            page = self._guard("adding page", doc.Pages.Add)
+            if name:
+                page.Name = name
+            return {"page": str(page.Name), "index": int(page.Index)}
+        if action == "activate":
+            if not name:
+                raise VisioMcpError("pages(action='activate') requires a page name")
+            page = self._page(name)
+            self._guard(
+                f"activating page {name!r}",
+                lambda: setattr(app.ActiveWindow, "Page", page),
+            )
+            return {"active_page": str(page.Name)}
+        raise VisioMcpError(f"Unknown pages action {action!r}; use list, add, or activate.")
+
+    # -- layout / introspection ------------------------------------------------
+
+    def auto_layout(
+        self,
+        style: str = "flowchart_tb",
+        spacing_in: float = 0.75,
+        resize_page: bool = True,
+        page_name: Optional[str] = None,
+    ) -> dict:
+        if style not in C.LAYOUT_STYLES:
+            raise VisioMcpError(
+                f"style must be one of {sorted(C.LAYOUT_STYLES)}, got {style!r}"
+            )
+        page = self._page(page_name)
+        place_style, route_style = C.LAYOUT_STYLES[style]
+
+        def _layout():
+            sheet = page.PageSheet
+            sheet.CellsU("PlaceStyle").ResultIU = place_style
+            sheet.CellsU("RouteStyle").ResultIU = route_style
+            sheet.CellsU("AvenueSizeX").ResultIU = spacing_in
+            sheet.CellsU("AvenueSizeY").ResultIU = spacing_in
+            page.Layout()
+            if resize_page:
+                page.ResizeToFitContents()
+
+        self._guard(f"auto-layout ({style})", _layout)
+        return {"page": str(page.Name), "style": style, "note": "Export a PNG to inspect the result."}
+
+    def get_page_state(self, page_name: Optional[str] = None) -> dict:
+        page = self._page(page_name)
+        shapes = []
+        for shape in _items(page.Shapes):
+            info = self._shape_info(shape)
+            try:
+                info["master"] = str(shape.Master.NameU) if shape.Master is not None else None
+            except Exception:
+                info["master"] = None
+            is_connector = False
+            try:
+                is_connector = bool(int(shape.OneD))
+            except Exception:
+                pass
+            info["is_connector"] = is_connector
+            if is_connector:
+                from_id = to_id = None
+                try:
+                    for connect in _items(shape.Connects):
+                        cell_name = str(connect.FromCell.Name)
+                        target = int(connect.ToSheet.ID)
+                        if cell_name.startswith("Begin"):
+                            from_id = target
+                        elif cell_name.startswith("End"):
+                            to_id = target
+                except Exception:
+                    pass
+                info["from_id"] = from_id
+                info["to_id"] = to_id
+            shapes.append(info)
+        sheet = page.PageSheet
+        return {
+            "page": str(page.Name),
+            "page_size_in": [
+                round(float(sheet.CellsU("PageWidth").ResultIU), 3),
+                round(float(sheet.CellsU("PageHeight").ResultIU), 3),
+            ],
+            "shapes": shapes,
+        }

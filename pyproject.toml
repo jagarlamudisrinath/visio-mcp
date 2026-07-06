@@ -1,0 +1,30 @@
+[project]
+name = "visio-mcp"
+version = "0.1.0"
+description = "MCP server that drives Microsoft Visio desktop via COM automation to draw flowcharts, block diagrams, and Azure/AWS architecture diagrams"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2.0",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.scripts]
+visio-mcp = "visio_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/visio_mcp"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
