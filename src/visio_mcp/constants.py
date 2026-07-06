@@ -8,6 +8,8 @@ scripts/smoke_test.py re-asserts the load-bearing values against
 win32com.client.constants at runtime when a generated typelib is available.
 """
 
+import os
+
 # --- VisOpenSaveArgs (Documents.OpenEx flags) ------------------------------
 VIS_OPEN_COPY = 0x1
 VIS_OPEN_RO = 0x2
@@ -119,6 +121,20 @@ MASTER_HINTS: dict[str, str] = {
     "resource group": "Resource groups are drawn as containers — use add_container.",
     "availability zone": "Availability zones are drawn as containers — use add_container.",
 }
+
+# --- Local custom-icon library ---------------------------------------------
+# Users manually download labeled image files (e.g. 'subnet.svg',
+# 'private-endpoint.png') into this folder; the server discovers them via
+# find_masters / list_local_icons and drops them by filename stem when Visio
+# has no matching master. Override the location with the VISIO_MCP_ICONS_DIR
+# environment variable. ICON_EXTS is ordered by preference: when one label
+# exists in several formats the earliest extension wins.
+ICONS_DIR_ENV = "VISIO_MCP_ICONS_DIR"
+DEFAULT_ICONS_DIR = os.path.join(os.path.expanduser("~"), ".visio-mcp", "icons")
+ICON_EXTS: tuple[str, ...] = (
+    ".svg", ".emf", ".wmf", ".png", ".jpg", ".jpeg", ".gif", ".bmp",
+)
+LOCAL_ICON_DEFAULT_IN = 0.5  # default size for an imported local icon (inches)
 
 # --- auto_layout style -> (PlaceStyle, RouteStyle) -------------------------
 LAYOUT_STYLES: dict[str, tuple[int, int]] = {

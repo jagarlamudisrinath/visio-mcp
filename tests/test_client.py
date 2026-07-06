@@ -98,6 +98,74 @@ def test_drop_with_size_override(client):
     assert result["shapes"][0]["height_in"] == 1.25
 
 
+def test_import_image_places_local_file_and_keeps_aspect(client, tmp_path):
+    client.create_document()
+    icon = tmp_path / "subnet.svg"
+    icon.write_text("<svg xmlns='http://www.w3.org/2000/svg'/>")
+    result = client.import_image(str(icon), x=5, y=6, width_in=0.3)
+    assert result["shape_id"] > 0
+    assert (result["x"], result["y"]) == (5, 6)
+    assert result["width_in"] == 0.3
+    # the fake's native shape is 1.0 x 0.75 -> height derived to keep aspect
+    assert result["height_in"] == pytest.approx(0.225)
+    assert result["imported_from"] == str(icon)
+
+
+def test_import_image_missing_file_is_actionable(client, tmp_path):
+    client.create_document()
+    with pytest.raises(VisioMcpError, match="not found"):
+        client.import_image(str(tmp_path / "nope.svg"), x=1, y=1)
+
+
+def test_find_masters_lists_local_icons(client, isolated_icons_dir):
+    client.create_document()
+    client.open_stencil("BASFLO_U.VSSX")
+    (isolated_icons_dir / "subnet.svg").write_text("<svg/>")
+    found = client.find_masters("subnet")
+    assert [(r["master"], r["stencil"]) for r in found["masters"]] == [
+        ("subnet", "(local icon)"),
+    ]
+    assert found["masters"][0]["path"].endswith("subnet.svg")
+    # local icons appear alongside real masters when no query is given
+    everything = client.find_masters()
+    assert len(everything["masters"]) == 6  # 5 flowchart masters + 1 local icon
+
+
+def test_drop_uses_local_icon_when_no_master(client, app, isolated_icons_dir):
+    client.create_document()
+    client.open_stencil("BASFLO_U.VSSX")
+    (isolated_icons_dir / "subnet.svg").write_text("<svg/>")
+    result = client.drop_shapes([{"master": "subnet", "x": 5, "y": 6}])
+    shape = result["shapes"][0]
+    assert shape["source"] == "local_icon"
+    assert shape["master"] == "subnet"
+    assert shape["imported_from"].endswith("subnet.svg")
+    assert (shape["x"], shape["y"]) == (5, 6)
+    # default local-icon size (0.5") with aspect preserved from the 1.0x0.75 fake
+    assert shape["width_in"] == C.LOCAL_ICON_DEFAULT_IN
+    assert shape["height_in"] == pytest.approx(0.375)
+    assert app.undo_scopes[-1][1] is True, "local-icon drop must commit its undo scope"
+
+
+def test_drop_local_icon_matches_normalized_label(client, isolated_icons_dir):
+    client.create_document()
+    client.open_stencil("BASFLO_U.VSSX")  # no 'Private Link' master here
+    (isolated_icons_dir / "Private Endpoint.svg").write_text("<svg/>")
+    result = client.drop_shapes([{"master": "private endpoint", "x": 2, "y": 2}])
+    assert result["shapes"][0]["source"] == "local_icon"
+    assert result["shapes"][0]["imported_from"].endswith("Private Endpoint.svg")
+
+
+def test_list_local_icons_reports_dir_and_files(client, isolated_icons_dir):
+    (isolated_icons_dir / "subnet.svg").write_text("<svg/>")
+    (isolated_icons_dir / "subnet.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    result = client.list_local_icons()
+    assert result["icons_dir"] == str(isolated_icons_dir)
+    assert result["exists"] is True
+    assert sorted(i["name"] for i in result["icons"]) == ["subnet", "subnet"]
+    assert {i["ext"] for i in result["icons"]} == {"svg", "png"}
+
+
 def test_connect_shapes_glues_routes_and_arrows(client, app):
     _build_flowchart(client)
     result = client.connect_shapes(1, 2, label="next", route="right_angle")

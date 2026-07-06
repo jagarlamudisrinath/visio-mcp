@@ -248,6 +248,15 @@ class FakePage:
     def Layout(self):
         self.layout_calls += 1
 
+    def Import(self, path):
+        # Real Visio.Page.Import loads an external file (SVG/PNG/...) as a new
+        # shape. The fake just needs to mint a shape the client can size/place.
+        shape = FakeShape(self, self._next_id, master=None, x=0.0, y=0.0)
+        self._next_id += 1
+        shape.NameU = f"Sheet.{shape.ID}"
+        self.shapes.append(shape)
+        return shape
+
     def ResizeToFitContents(self):
         self.resize_calls += 1
 

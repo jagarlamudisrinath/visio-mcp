@@ -7,10 +7,13 @@ objects (see runtime.py for why).
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import os
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from typing import Literal, Optional
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -40,7 +43,12 @@ mcp = FastMCP(
         "AWS icons, Visio ships built-in cloud stencils — visio_status lists "
         "them in builtin_cloud_stencils and they open by bare filename (e.g. "
         "open_stencil('AZURESTORAGE_U.VSSX')); extra vendor packs can go in "
-        "the My Shapes folder. Search open stencils with find_masters."
+        "the My Shapes folder. Search open stencils with find_masters. For an "
+        "icon Visio has no master for (e.g. the Azure 'Subnet' glyph), save a "
+        "labeled image (subnet.svg) in the local icon folder (list_local_icons "
+        "shows the path) so drop_shape('subnet', ...) places it, or insert one "
+        "on the fly with import_image (a local file path or a direct image "
+        "URL)."
     ),
 )
 
@@ -60,6 +68,47 @@ def _tool_errors(fn):
             raise ToolError(str(exc)) from exc
 
     return wrapper
+
+
+_IMAGE_EXTS = {".svg", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".emf", ".wmf"}
+_CTYPE_EXT = {
+    "image/svg+xml": ".svg",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
+
+
+def _download_image_to_temp(url: str) -> str:
+    """Download a direct image URL to a temp file for Visio to Import.
+
+    Guards against the common failure where an icon *gallery* URL returns an
+    HTML single-page app instead of the raw image bytes.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "visio-mcp"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            data = resp.read()
+    except Exception as exc:
+        raise VisioMcpError(f"Failed to download image from {url!r}: {exc}") from exc
+    head = data[:64].lstrip().lower()
+    if ctype == "text/html" or head.startswith(b"<!doctype html") or head.startswith(b"<html"):
+        raise VisioMcpError(
+            f"{url!r} returned an HTML page, not an image. Icon galleries like "
+            "az-icons.com are single-page apps whose /icon URLs serve HTML — "
+            "use the site's Download button and pass the saved file path, or a "
+            "direct raw image URL (one that ends in .svg/.png)."
+        )
+    ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+    if ext not in _IMAGE_EXTS:
+        ext = _CTYPE_EXT.get(ctype, ".img")
+    fd, tmp = tempfile.mkstemp(prefix="visio_mcp_icon_", suffix=ext)
+    os.close(fd)
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    return tmp
 
 
 @mcp.tool()
@@ -147,8 +196,24 @@ async def open_stencil(name_or_path: str) -> dict:
 @_tool_errors
 async def find_masters(query: Optional[str] = None, stencil: Optional[str] = None) -> dict:
     """Search masters (droppable shapes) in the open stencils by name
-    substring. Omit `query` to list everything (capped at 100)."""
+    substring. Omit `query` to list everything (capped at 100). Matching
+    custom icons from the local icon folder are included too, marked with
+    stencil '(local icon)'."""
     return await _worker.run(_client.find_masters, query, stencil)
+
+
+@mcp.tool()
+@_tool_errors
+async def list_local_icons() -> dict:
+    """List the local custom-icon folder and the labeled image files in it.
+
+    Users manually download icons (e.g. from az-icons.com) and save them into
+    this folder; each file's name without its extension is its label. Labels
+    are discoverable via find_masters and can be placed with
+    drop_shape('<label>', x, y) when Visio has no built-in master. The folder
+    defaults to ~/.visio-mcp/icons and moves with the VISIO_MCP_ICONS_DIR
+    environment variable."""
+    return await _worker.run(_client.list_local_icons)
 
 
 @mcp.tool()
@@ -180,6 +245,42 @@ async def drop_shapes(shapes: list[DropSpec], page: Optional[str] = None) -> dic
     Executed in a single undo scope. Returns a shape_id per item, in order."""
     specs = [s.model_dump() for s in shapes]
     return await _worker.run(_client.drop_shapes, specs, page)
+
+
+@mcp.tool()
+@_tool_errors
+async def import_image(
+    source: str,
+    x: float,
+    y: float,
+    width_in: Optional[float] = None,
+    height_in: Optional[float] = None,
+    page: Optional[str] = None,
+) -> dict:
+    """Insert an external image (SVG, PNG, JPG, EMF, ...) onto the page as a
+    shape — for custom icons that have NO Visio master (e.g. the newer Azure
+    'Subnet' glyph) or vendor logos.
+
+    Args:
+        source: a LOCAL file path OR a direct http(s) IMAGE URL. A URL must
+            point at the raw image bytes; icon *web pages* (single-page-app
+            galleries such as az-icons.com) return HTML and are rejected with
+            guidance — download the file in the browser and pass its path.
+        x, y: shape CENTER in inches from the bottom-left.
+        width_in / height_in: size in inches. Give just one to scale the other
+            automatically and preserve the image's aspect ratio; omit both to
+            keep the image's native size.
+
+    Prefer built-in masters (drop_shape) when Visio has the icon; use this for
+    the gaps. Returns the shape_id.
+    """
+    path = source
+    if source.strip().lower().startswith(("http://", "https://")):
+        loop = asyncio.get_running_loop()
+        path = await loop.run_in_executor(None, _download_image_to_temp, source.strip())
+    return await _worker.run(
+        _client.import_image, path, x, y, width_in, height_in, page
+    )
 
 
 @mcp.tool()

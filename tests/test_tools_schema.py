@@ -1,4 +1,4 @@
-"""The 16 MCP tools register with correct names and schemas."""
+"""The 22 MCP tools register with correct names and schemas."""
 
 import sys
 
@@ -14,8 +14,10 @@ EXPECTED_TOOLS = {
     "export_page_png",
     "open_stencil",
     "find_masters",
+    "list_local_icons",
     "drop_shape",
     "drop_shapes",
+    "import_image",
     "update_shape",
     "style_shape",
     "delete_shapes",
@@ -34,7 +36,7 @@ async def test_all_tools_registered():
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 20
+    assert len(EXPECTED_TOOLS) == 22
 
 
 async def test_every_tool_has_description_mentioning_behavior():

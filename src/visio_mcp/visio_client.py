@@ -38,6 +38,61 @@ def _items(collection):
         yield collection.Item(i)
 
 
+def _icons_dir() -> str:
+    """Folder where users drop labeled custom icons (VISIO_MCP_ICONS_DIR)."""
+    return os.environ.get(C.ICONS_DIR_ENV) or C.DEFAULT_ICONS_DIR
+
+
+def _norm_label(text: Any) -> str:
+    """Normalize a label/query so 'Private Endpoint', 'private_endpoint' and
+    'private-endpoint' all compare equal."""
+    chars = ["-" if ch in " _-" else ch for ch in str(text).strip().lower()]
+    normalized = "".join(chars)
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-")
+
+
+def _list_local_icons() -> list[dict]:
+    """Image files in the local icon folder, as {name, path, ext} rows."""
+    directory = _icons_dir()
+    icons: list[dict] = []
+    try:
+        entries = sorted(os.listdir(directory))
+    except OSError:
+        return icons
+    for filename in entries:
+        full = os.path.join(directory, filename)
+        stem, ext = os.path.splitext(filename)
+        if ext.lower() in C.ICON_EXTS and os.path.isfile(full):
+            icons.append({"name": stem, "path": full, "ext": ext.lower().lstrip(".")})
+    return icons
+
+
+def _ext_rank(path: str) -> int:
+    ext = os.path.splitext(path)[1].lower()
+    return C.ICON_EXTS.index(ext) if ext in C.ICON_EXTS else len(C.ICON_EXTS)
+
+
+def _find_local_icon(name: str) -> Optional[str]:
+    """Resolve a drop name to a local icon file path (None if no clear match).
+
+    Prefers an exact normalized-label match, then a unique-label substring
+    match; when a label exists in several formats the ICON_EXTS order decides.
+    """
+    if not name or not str(name).strip():
+        return None
+    target = _norm_label(name)
+    icons = _list_local_icons()
+    exact = [ic["path"] for ic in icons if _norm_label(ic["name"]) == target]
+    if exact:
+        return sorted(exact, key=_ext_rank)[0]
+    subs = [ic for ic in icons if target and target in _norm_label(ic["name"])]
+    if len({_norm_label(ic["name"]) for ic in subs}) == 1:
+        return sorted((ic["path"] for ic in subs), key=_ext_rank)[0]
+    return None
+
+
 def _stencil_files_under(root: str) -> list[str]:
     """All .vss/.vssx files under root, case-insensitive (stencil filenames
     are conventionally uppercase)."""
@@ -342,11 +397,6 @@ class VisioClient:
                     "or omit the stencil argument to search all open stencils."
                 )
         total_masters = sum(int(m.Count) for _, m in sources)
-        if total_masters == 0:
-            raise VisioMcpError(
-                "No stencils are open — call open_stencil first (e.g. "
-                "open_stencil('BASFLO_U.VSSX') for basic flowchart shapes)."
-            )
         rows = []
         q = (query or "").lower()
         for source_name, masters in sources:
@@ -357,7 +407,52 @@ class VisioClient:
                 rows.append({"master": name, "stencil": source_name})
                 if len(rows) >= 100:
                     return {"masters": rows, "truncated": True}
+        # Local custom icons are discoverable alongside masters (unless a
+        # specific stencil was requested, which only applies to Visio masters).
+        local_rows = []
+        if stencil is None:
+            qn = _norm_label(query or "")
+            for ic in _list_local_icons():
+                if q and q not in ic["name"].lower() and (
+                    not qn or qn not in _norm_label(ic["name"])
+                ):
+                    continue
+                local_rows.append(
+                    {"master": ic["name"], "stencil": "(local icon)", "path": ic["path"]}
+                )
+        for row in local_rows:
+            rows.append(row)
+            if len(rows) >= 100:
+                return {"masters": rows, "truncated": True}
+        if total_masters == 0 and not local_rows:
+            raise VisioMcpError(
+                "No stencils are open — call open_stencil first (e.g. "
+                "open_stencil('BASFLO_U.VSSX') for basic flowchart shapes)."
+            )
         return {"masters": rows, "truncated": False}
+
+    def list_local_icons(self) -> dict:
+        """Report the local custom-icon folder and the labeled files in it.
+
+        No COM needed — this just inspects the folder users drop icons into.
+        """
+        directory = _icons_dir()
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError:
+            pass
+        return {
+            "icons_dir": directory,
+            "exists": os.path.isdir(directory),
+            "icons": _list_local_icons(),
+            "note": (
+                "Save labeled image files here (e.g. 'subnet.svg', "
+                "'private-endpoint.png'); the label is the file name without "
+                "its extension. Labels are discoverable via find_masters and "
+                "can be placed with drop_shape('<label>', x, y) when Visio has "
+                "no built-in master."
+            ),
+        }
 
     def _find_master(self, master: str, stencil: Optional[str] = None, _alias_depth: int = 0):
         sources = self._master_sources()
@@ -422,7 +517,18 @@ class VisioClient:
         scope = self._guard("starting undo scope", lambda: app.BeginUndoScope("Drop shapes"))
         try:
             for spec in parsed:
-                m = self._find_master(spec.master, spec.stencil)
+                try:
+                    m = self._find_master(spec.master, spec.stencil)
+                except VisioMcpError:
+                    icon_path = _find_local_icon(spec.master)
+                    if icon_path is None:
+                        raise
+                    w, h = spec.width_in, spec.height_in
+                    if w is None and h is None:
+                        w = C.LOCAL_ICON_DEFAULT_IN
+                    info = self.import_image(icon_path, spec.x, spec.y, w, h, page_name)
+                    results.append({**info, "master": spec.master, "source": "local_icon"})
+                    continue
                 shape = self._guard(
                     f"dropping master {spec.master!r}",
                     lambda m=m, s=spec: page.Drop(m, s.x, s.y),
@@ -442,6 +548,56 @@ class VisioClient:
                 pass
             raise
         return {"page": str(page.Name), "shapes": results}
+
+    def import_image(
+        self,
+        path: str,
+        x: float,
+        y: float,
+        width_in: Optional[float] = None,
+        height_in: Optional[float] = None,
+        page_name: Optional[str] = None,
+    ) -> dict:
+        """Import an external image file (SVG/PNG/JPG/EMF/...) as a page shape.
+
+        Used for icons that have no Visio master (e.g. Azure's 'Subnet' glyph)
+        or vendor logos. `path` must be a LOCAL file; remote URLs are fetched
+        by the server tool before this runs. (x, y) is the shape center in
+        inches. When only one of width/height is given the other is derived
+        from the image's native aspect ratio.
+        """
+        if not path or not str(path).strip():
+            raise VisioMcpError("path must not be empty")
+        if not os.path.isfile(path):
+            raise VisioMcpError(
+                f"Image file not found: {path!r}. Pass an absolute path to a "
+                "local image file (download remote icons first, or use the "
+                "import_image tool with an http(s) URL)."
+            )
+        for name, value in (("width_in", width_in), ("height_in", height_in)):
+            if value is not None and value <= 0:
+                raise VisioMcpError(f"{name} must be positive, got {value}")
+        page = self._page(page_name)
+
+        def _import():
+            shape = page.Import(path)
+            native_w = float(shape.CellsU("Width").ResultIU)
+            native_h = float(shape.CellsU("Height").ResultIU)
+            w, h = width_in, height_in
+            if w is not None and h is None and native_w:
+                h = w * (native_h / native_w)
+            elif h is not None and w is None and native_h:
+                w = h * (native_w / native_h)
+            if w is not None:
+                shape.CellsU("Width").ResultIU = w
+            if h is not None:
+                shape.CellsU("Height").ResultIU = h
+            shape.CellsU("PinX").ResultIU = x
+            shape.CellsU("PinY").ResultIU = y
+            return shape
+
+        shape = self._guard(f"importing image {os.path.basename(path)!r}", _import)
+        return {**self._shape_info(shape), "imported_from": path}
 
     def update_shape(
         self,

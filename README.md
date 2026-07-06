@@ -33,6 +33,25 @@ For older Visio versions or extra vendor packs, download stencils and unzip the 
 
 `open_stencil("azure")` fuzzy-matches any `.vssx`/`.vss` file under My Shapes, and `find_masters("virtual machine")` searches inside whatever is open.
 
+### Custom icons (no built-in master)
+
+A few concepts have no Visio master at all — notably the newer Azure **Subnet** glyph. For these the
+server keeps a **local icon folder**: drop labeled image files (`subnet.svg`, `private-endpoint.png`,
+…) into it and they become first-class, reusable icons.
+
+- `list_local_icons` reports the folder path and its contents. It defaults to `~/.visio-mcp/icons`
+  and can be moved with the `VISIO_MCP_ICONS_DIR` environment variable.
+- The file name without its extension is the **label**. Labels are surfaced by `find_masters`
+  (marked `stencil: "(local icon)"`) and placed with `drop_shape("subnet", x, y)` — real Visio
+  masters always take precedence; the local icon is the fallback before the "no master" error.
+- For a one-off (or a direct image URL) you can still `import_image(source, x, y)` without saving a
+  file. Icon-gallery web pages (e.g. az-icons.com) are single-page apps that return HTML rather than
+  the image, so download the file (its **Download** button) or pass a direct raw image URL.
+
+Icons are yours to supply — nothing is bundled — so respect each vendor's icon terms of use (e.g.
+Microsoft's / AWS's) for anything you place there.
+
+
 ### Smoke test
 
 Verifies the full pipeline end-to-end (launches Visio, builds a small styled flowchart, auto-lays it out, exports a PNG, saves/reopens the .vsdx):
