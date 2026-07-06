@@ -967,6 +967,93 @@ class VisioClient:
         self._guard(f"{'adding' if action == 'add' else 'removing'} container members", _apply)
         return {"container_id": container_id, "action": action, "member_ids": member_ids}
 
+    def badge_container(
+        self,
+        container_id: int,
+        icon: str,
+        corner: str = "top_left",
+        size_in: float = 0.35,
+        page_name: Optional[str] = None,
+        inset_in: float = 0.15,
+    ) -> dict:
+        """Place a small header icon just inside a container's corner.
+
+        Resolves `icon` to a built-in master first, then to a labeled image in
+        the local icon folder; the badge becomes a container member so it moves
+        with the zone. Placement is computed from the container's bounds — no
+        caller coordinate math.
+        """
+        corners = ("top_left", "top_right", "bottom_left", "bottom_right")
+        if corner not in corners:
+            raise VisioMcpError(f"corner must be one of {list(corners)}, got {corner!r}")
+        if size_in <= 0:
+            raise VisioMcpError(f"size_in must be positive, got {size_in}")
+        app = self._app()
+        page = self._page(page_name)
+        container = self._shape_by_id(page, container_id)
+        props = container.ContainerProperties
+        if props is None:
+            raise VisioMcpError(
+                f"Shape {container_id} is not a container — create one with "
+                "add_container, then badge it."
+            )
+
+        icon_master = None
+        icon_path = None
+        try:
+            icon_master = self._find_master(icon)
+        except VisioMcpError:
+            icon_path = _find_local_icon(icon)
+            if icon_path is None:
+                raise VisioMcpError(
+                    f"No Visio master or local icon matches {icon!r}. Open the "
+                    "stencil that contains the master, or save a labeled image "
+                    f"(e.g. {icon.strip().lower().replace(' ', '-') + '.svg'!r}) "
+                    "in the local icon folder (see list_local_icons), then retry."
+                )
+
+        # container bounds in page coordinates (LocPin is not always center)
+        left = float(container.CellsU("PinX").ResultIU) - float(container.CellsU("LocPinX").ResultIU)
+        bottom = float(container.CellsU("PinY").ResultIU) - float(container.CellsU("LocPinY").ResultIU)
+        right = left + float(container.CellsU("Width").ResultIU)
+        top = bottom + float(container.CellsU("Height").ResultIU)
+        half = size_in / 2
+        x = (left + inset_in + half) if corner.endswith("left") else (right - inset_in - half)
+        y = (top - inset_in - half) if corner.startswith("top") else (bottom + inset_in + half)
+
+        def _build():
+            if icon_master is not None:
+                badge = page.Drop(icon_master, x, y)
+                native_w = float(badge.CellsU("Width").ResultIU)
+                native_h = float(badge.CellsU("Height").ResultIU)
+                badge.CellsU("Width").ResultIU = size_in
+                if native_w:
+                    badge.CellsU("Height").ResultIU = size_in * (native_h / native_w)
+                badge.CellsU("PinX").ResultIU = x
+                badge.CellsU("PinY").ResultIU = y
+            else:
+                info = self.import_image(icon_path, x, y, size_in, None, page_name)
+                badge = self._shape_by_id(page, info["shape_id"])
+            props.AddMember(badge, C.VIS_MEMBER_ADD_EXPAND_CONTAINER)
+            return badge
+
+        scope = self._guard("starting undo scope", lambda: app.BeginUndoScope("Badge container"))
+        try:
+            badge = self._guard(f"badging container {container_id} with {icon!r}", _build)
+            self._guard("closing undo scope", lambda: app.EndUndoScope(scope, True))
+        except Exception:
+            try:
+                app.EndUndoScope(scope, False)
+            except Exception:
+                pass
+            raise
+        return {
+            **self._shape_info(badge),
+            "container_id": container_id,
+            "corner": corner,
+            "source": "master" if icon_master is not None else "local_icon",
+        }
+
     # -- layout / introspection ------------------------------------------------
 
     def auto_layout(

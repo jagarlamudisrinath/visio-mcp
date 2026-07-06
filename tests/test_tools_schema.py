@@ -1,4 +1,4 @@
-"""The 22 MCP tools register with correct names and schemas."""
+"""The 23 MCP tools register with correct names and schemas."""
 
 import sys
 
@@ -29,6 +29,7 @@ EXPECTED_TOOLS = {
     "drop_text",
     "add_container",
     "container_members",
+    "badge_container",
 }
 
 
@@ -36,7 +37,7 @@ async def test_all_tools_registered():
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 22
+    assert len(EXPECTED_TOOLS) == 23
 
 
 async def test_every_tool_has_description_mentioning_behavior():

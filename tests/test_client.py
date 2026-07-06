@@ -441,6 +441,76 @@ def test_add_container_bbox_respects_off_center_pin(client, app):
     assert result["height_in"] == pytest.approx(1.75)
 
 
+def _badge_bounds(container):
+    left = container["x"] - container["width_in"] / 2
+    right = container["x"] + container["width_in"] / 2
+    bottom = container["y"] - container["height_in"] / 2
+    top = container["y"] + container["height_in"] / 2
+    return left, right, bottom, top
+
+
+def test_badge_container_places_master_icon_in_corner(client, app):
+    _build_flowchart(client)
+    container = client.add_container("VNet", [1, 2])
+    result = client.badge_container(container["shape_id"], "Process")
+    assert result["source"] == "master"
+    assert result["container_id"] == container["shape_id"]
+    assert result["corner"] == "top_left"
+    assert result["width_in"] == pytest.approx(0.35)
+    assert result["height_in"] == pytest.approx(0.35 * 0.75)  # native 1.0 x 0.75
+    left, right, bottom, top = _badge_bounds(container)
+    # inside the container, in the top-left quadrant
+    assert left < result["x"] < container["x"]
+    assert container["y"] < result["y"] < top
+    assert result["x"] == pytest.approx(left + 0.15 + 0.175)
+    assert result["y"] == pytest.approx(top - 0.15 - 0.175)
+    # the badge is a member, so it moves with the zone
+    badge = app.ActivePage.Shapes.ItemFromID(result["shape_id"])
+    assert container["shape_id"] in badge.member_of
+
+
+def test_badge_container_corners(client):
+    _build_flowchart(client)
+    container = client.add_container("Zone", [1, 2])
+    tr = client.badge_container(container["shape_id"], "Process", corner="top_right")
+    br = client.badge_container(container["shape_id"], "Process", corner="bottom_right")
+    left, right, bottom, top = _badge_bounds(container)
+    assert tr["x"] == pytest.approx(right - 0.15 - 0.175)
+    assert tr["y"] == pytest.approx(top - 0.15 - 0.175)
+    assert br["y"] == pytest.approx(bottom + 0.15 + 0.175)
+
+
+def test_badge_container_falls_back_to_local_icon(client, app, isolated_icons_dir):
+    (isolated_icons_dir / "subnet.svg").write_text("<svg/>")
+    _build_flowchart(client)
+    container = client.add_container("Data subnet", [2])
+    result = client.badge_container(container["shape_id"], "subnet")
+    assert result["source"] == "local_icon"
+    assert result["width_in"] == pytest.approx(0.35)
+    badge = app.ActivePage.Shapes.ItemFromID(result["shape_id"])
+    assert container["shape_id"] in badge.member_of
+
+
+def test_badge_container_requires_a_container(client):
+    _build_flowchart(client)
+    with pytest.raises(VisioMcpError, match="not a container"):
+        client.badge_container(1, "Process")
+
+
+def test_badge_container_unknown_icon_is_actionable(client):
+    _build_flowchart(client)
+    container = client.add_container("Zone", [1])
+    with pytest.raises(VisioMcpError, match="local icon folder"):
+        client.badge_container(container["shape_id"], "subscription")
+
+
+def test_badge_container_rejects_bad_corner(client):
+    _build_flowchart(client)
+    container = client.add_container("Zone", [1])
+    with pytest.raises(VisioMcpError, match="corner"):
+        client.badge_container(container["shape_id"], "Process", corner="middle")
+
+
 def test_set_page_size_validates_before_mutating(client, app):
     client.create_document()
     with pytest.raises(VisioMcpError, match="orientation"):

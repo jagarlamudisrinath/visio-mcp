@@ -37,8 +37,10 @@ mcp = FastMCP(
         "Rough placement is fine when you finish with auto_layout. For wide "
         "architecture diagrams, call set_page_size FIRST (default page is "
         "8.5x11 and the PNG export crops to it). Group shapes into zones "
-        "(VNet/VPC/subnet/trust boundary) with add_container — innermost "
-        "containers first. Use drop_text for titles and legends, and dashed "
+        "(VNet/VPC/subnet/subscription/trust boundary) with add_container — "
+        "innermost containers first — and badge a zone with its header icon "
+        "via badge_container (deterministic corner placement; the badge moves "
+        "with the zone). Use drop_text for titles and legends, and dashed "
         "connectors (line_pattern) for control-plane/auth flows. For Azure/"
         "AWS icons, Visio ships built-in cloud stencils — visio_status lists "
         "them in builtin_cloud_stencils and they open by bare filename (e.g. "
@@ -475,6 +477,30 @@ async def container_members(
     """Add shapes to or remove shapes from an existing container."""
     return await _worker.run(
         _client.container_members, action, container_id, member_ids, page
+    )
+
+
+@mcp.tool()
+@_tool_errors
+async def badge_container(
+    container_id: int,
+    icon: str,
+    corner: Literal["top_left", "top_right", "bottom_left", "bottom_right"] = "top_left",
+    size_in: float = 0.35,
+    page: Optional[str] = None,
+) -> dict:
+    """Badge a container (zone) with a small header icon — e.g. the VNet icon
+    on a VNet container, or the Subnet/Subscription icon on those boundaries.
+
+    Placement is deterministic: the icon is dropped just inside the chosen
+    corner of the container (computed from the container's bounds — no manual
+    coordinate math) and added as a container member so it moves with the
+    zone. `icon` resolves to a built-in Visio master first (e.g. 'Virtual
+    Networks'), then to a labeled image in the local icon folder (e.g. a saved
+    'subnet.svg' — see list_local_icons); errors with guidance when neither
+    exists. Returns the badge's shape_id."""
+    return await _worker.run(
+        _client.badge_container, container_id, icon, corner, size_in, page
     )
 
 

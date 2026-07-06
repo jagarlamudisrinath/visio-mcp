@@ -114,17 +114,40 @@ MASTER_ALIASES: dict[str, str] = {
 }
 
 # Guessed names that are not masters at all -> guidance for the agent.
+_NO_MASTER_BOUNDARY = (
+    "{concept} have no Visio master — draw the boundary with add_container. "
+    "For a header icon on the box, save a labeled image (e.g. {example!r}) in "
+    "the local icon folder (see list_local_icons), then "
+    "badge_container(container_id, {label!r})."
+)
 MASTER_HINTS: dict[str, str] = {
-    "subnet": (
-        "Subnets have no Visio master. Draw the boundary with add_container. "
-        "For a header icon on the box, save a labeled image (e.g. 'subnet.svg') "
-        "in the local icon folder (see list_local_icons), then retry "
-        "drop_shape('subnet', ...)."
+    "subnet": _NO_MASTER_BOUNDARY.format(
+        concept="Subnets", example="subnet.svg", label="subnet"
     ),
-    "vnet": "VNets are drawn as containers, not masters — use add_container.",
-    "vpc": "VPCs are drawn as containers, not masters — use add_container.",
-    "resource group": "Resource groups are drawn as containers — use add_container.",
-    "availability zone": "Availability zones are drawn as containers — use add_container.",
+    "vnet": (
+        "VNets are drawn as containers, not masters — use add_container. For a "
+        "header icon on the box, badge_container(container_id, 'Virtual "
+        "Networks') uses the built-in master."
+    ),
+    "vpc": (
+        "VPCs are drawn as containers, not masters — use add_container. For a "
+        "header icon on the box, use badge_container with the AWS VPC master "
+        "(find_masters('vpc') with an AWS stencil open) or a saved local icon."
+    ),
+    "resource group": _NO_MASTER_BOUNDARY.format(
+        concept="Resource groups", example="resource-group.svg", label="resource group"
+    ),
+    "availability zone": _NO_MASTER_BOUNDARY.format(
+        concept="Availability zones", example="availability-zone.svg",
+        label="availability zone",
+    ),
+    "subscription": _NO_MASTER_BOUNDARY.format(
+        concept="Subscriptions", example="subscription.svg", label="subscription"
+    ),
+    "management group": _NO_MASTER_BOUNDARY.format(
+        concept="Management groups", example="management-group.svg",
+        label="management group",
+    ),
 }
 
 # --- Local custom-icon library ---------------------------------------------
