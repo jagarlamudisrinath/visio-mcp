@@ -120,7 +120,34 @@ def main() -> int:
         call(client.style_shape, state["ids"][1],
              None, "#DDEBF7", "#2F5B7C", None, 1.5, 11, True)
 
-    @step(7, "auto-layout flowchart_tb moves shapes")
+    @step(7, "dashed grey connector (control-plane convention)")
+    def dashed_connector():
+        b, c = state["ids"][1], state["ids"][2]
+        call(client.connect_shapes, c, b, "retry", "right_angle", True, False,
+             None, "dashed", 1.0, "#808080")
+
+    @step(8, "set_page_size to 14x10 landscape and back to fit")
+    def page_size():
+        result = call(client.set_page_size, 14, 10)
+        assert result["page_size_in"] == [14, 10]
+        call(client.set_page_size, None, None, None, True)  # fit_to_contents
+
+    @step(9, "drop_text title renders without border/fill")
+    def text_label():
+        result = call(client.drop_text, "Login Flow (smoke test)", 4, 10.6,
+                      None, None, 16, True, "#333333", "center")
+        assert result["is_text"]
+
+    @step(10, "add_container wraps process+decision; membership round-trips")
+    def container():
+        b, c = state["ids"][1], state["ids"][2]
+        result = call(client.add_container, "Validation zone", [b, c])
+        page_state = call(client.get_page_state)
+        members = {s["shape_id"] for s in page_state["shapes"]
+                   if result["shape_id"] in s.get("container_ids", [])}
+        assert {b, c} <= members, "container membership did not round-trip"
+
+    @step(11, "auto-layout flowchart_tb moves shapes")
     def layout():
         before = {s["shape_id"]: (s["x"], s["y"])
                   for s in call(client.get_page_state)["shapes"]}
@@ -129,20 +156,20 @@ def main() -> int:
                  for s in call(client.get_page_state)["shapes"]}
         assert before != after, "layout did not move anything (may be OK, eyeball the PNG)"
 
-    @step(8, "export page PNG")
+    @step(12, "export page PNG")
     def export():
         result = call(client.export_page_png, png_path)
         assert os.path.getsize(result["path"]) > 1024, "PNG suspiciously small"
         os.startfile(result["path"])  # noqa: S606 — open for eyeball check
 
-    @step(9, "save .vsdx, reopen it, shapes survive")
+    @step(13, "save .vsdx, reopen it, shapes survive")
     def save_reopen():
         call(client.save_document, vsdx_path)
         call(client.open_document, vsdx_path)
         page_state = call(client.get_page_state)
         assert len(page_state["shapes"]) >= 9, "shapes lost in save/reopen round-trip"
 
-    @step(10, "optional: Azure/AWS stencils under My Shapes")
+    @step(14, "optional: Azure/AWS stencils under My Shapes")
     def cloud_stencils():
         import glob
 
@@ -158,7 +185,8 @@ def main() -> int:
         print(f"      opened {info['stencil']} with {info['master_count']} masters")
 
     for fn in (check_constants, status, create, stencil, drop, connect,
-               style, layout, export, save_reopen, cloud_stencils):
+               style, dashed_connector, page_size, text_label, container,
+               layout, export, save_reopen, cloud_stencils):
         fn()
 
     worker.shutdown(release=client.release)

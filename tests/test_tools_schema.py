@@ -23,14 +23,18 @@ EXPECTED_TOOLS = {
     "pages",
     "auto_layout",
     "get_page_state",
+    "set_page_size",
+    "drop_text",
+    "add_container",
+    "container_members",
 }
 
 
-async def test_all_sixteen_tools_registered():
+async def test_all_tools_registered():
     tools = await server.mcp.list_tools()
     names = {t.name for t in tools}
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 16
+    assert len(EXPECTED_TOOLS) == 20
 
 
 async def test_every_tool_has_description_mentioning_behavior():
@@ -56,6 +60,20 @@ async def test_auto_layout_style_enum():
     assert schema["properties"]["style"]["enum"] == [
         "flowchart_tb", "flowchart_lr", "tree_tb", "tree_lr", "radial", "circular",
     ]
+
+
+async def test_connect_shapes_line_pattern_enum():
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+    schema = tools["connect_shapes"].inputSchema
+    assert schema["properties"]["line_pattern"]["enum"] == [
+        "solid", "dashed", "dotted", "dash_dot",
+    ]
+
+
+async def test_add_container_requires_label_and_members():
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+    schema = tools["add_container"].inputSchema
+    assert set(schema["required"]) == {"label", "member_ids"}
 
 
 async def test_instructions_document_coordinate_system():

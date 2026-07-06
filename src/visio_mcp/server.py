@@ -31,10 +31,15 @@ mcp = FastMCP(
         "export_page_png to SEE the result and iterate -> save_document. "
         "Coordinate system: units are INCHES, origin at the page BOTTOM-LEFT, "
         "y grows UPWARD, and the drop point (x, y) is the shape's CENTER. "
-        "Rough placement is fine when you finish with auto_layout. For Azure/"
-        "AWS architecture diagrams, open the official stencil packs installed "
-        "in the My Shapes folder (see visio_status.my_shapes_path) and search "
-        "them with find_masters."
+        "Rough placement is fine when you finish with auto_layout. For wide "
+        "architecture diagrams, call set_page_size FIRST (default page is "
+        "8.5x11 and the PNG export crops to it). Group shapes into zones "
+        "(VNet/VPC/subnet/trust boundary) with add_container — innermost "
+        "containers first. Use drop_text for titles and legends, and dashed "
+        "connectors (line_pattern) for control-plane/auth flows. For Azure/"
+        "AWS icons, recent Visio ships built-in Azure/AWS stencils, or open "
+        "stencil packs installed in the My Shapes folder (see "
+        "visio_status.my_shapes_path) and search them with find_masters."
     ),
 )
 
@@ -202,13 +207,14 @@ async def style_shape(
     line_weight_pt: Optional[float] = None,
     font_size_pt: Optional[float] = None,
     bold: Optional[bool] = None,
+    line_pattern: Optional[Literal["solid", "dashed", "dotted", "dash_dot"]] = None,
     page: Optional[str] = None,
 ) -> dict:
-    """Style a shape. Colors are hex like '#0078D4' (Azure blue) or '#FF9900'
-    (AWS orange). Only the provided fields are changed."""
+    """Style a shape or connector. Colors are hex like '#0078D4' (Azure blue)
+    or '#FF9900' (AWS orange). Only the provided fields are changed."""
     return await _worker.run(
         _client.style_shape, shape_id, page, fill_color, line_color,
-        text_color, line_weight_pt, font_size_pt, bold,
+        text_color, line_weight_pt, font_size_pt, bold, line_pattern,
     )
 
 
@@ -228,6 +234,9 @@ async def connect_shapes(
     route: Literal["right_angle", "straight", "curved"] = "right_angle",
     end_arrow: bool = True,
     begin_arrow: bool = False,
+    line_pattern: Literal["solid", "dashed", "dotted", "dash_dot"] = "solid",
+    line_weight_pt: Optional[float] = None,
+    line_color: Optional[str] = None,
     page: Optional[str] = None,
 ) -> dict:
     """Connect two shapes with a dynamic connector glued to both (Visio
@@ -236,10 +245,14 @@ async def connect_shapes(
     Args:
         label: Optional text on the connector (e.g. 'Yes' / 'No').
         route: 'right_angle' (default), 'straight', or 'curved'.
+        line_pattern: 'dashed'/'dotted' are the convention for control-plane,
+            auth, or reference flows in architecture diagrams.
+        line_weight_pt: Thicker lines (e.g. 2) suit peering/trust boundaries.
+        line_color: Hex like '#808080'.
     """
     return await _worker.run(
         _client.connect_shapes, from_id, to_id, label, route,
-        end_arrow, begin_arrow, page,
+        end_arrow, begin_arrow, page, line_pattern, line_weight_pt, line_color,
     )
 
 
@@ -271,10 +284,98 @@ async def auto_layout(
 
 @mcp.tool()
 @_tool_errors
+async def set_page_size(
+    width_in: Optional[float] = None,
+    height_in: Optional[float] = None,
+    orientation: Optional[Literal["portrait", "landscape"]] = None,
+    fit_to_contents: bool = False,
+    page: Optional[str] = None,
+) -> dict:
+    """Resize the page. Do this BEFORE building a wide architecture diagram —
+    the default page is US Letter (8.5 x 11 in) and export_page_png crops to
+    the page bounds, so shapes placed beyond them are invisible.
+
+    Args:
+        width_in / height_in: New page size in inches (e.g. 20 x 12 for a
+            hybrid-cloud reference diagram).
+        orientation: Print orientation; inferred from the size if omitted.
+        fit_to_contents: True = shrink/grow the page to fit what's on it
+            (alternative to explicit width/height).
+    """
+    return await _worker.run(
+        _client.set_page_size, width_in, height_in, orientation, fit_to_contents, page
+    )
+
+
+@mcp.tool()
+@_tool_errors
+async def drop_text(
+    text: str,
+    x: float,
+    y: float,
+    width_in: Optional[float] = None,
+    height_in: Optional[float] = None,
+    font_size_pt: float = 10.0,
+    bold: bool = False,
+    text_color: Optional[str] = None,
+    align: Literal["left", "center", "right"] = "center",
+    page: Optional[str] = None,
+) -> dict:
+    """Drop a text-only label (no border, no fill) — for diagram titles,
+    legends, and callouts. (x, y) is the CENTER in inches. Size is estimated
+    from the text if omitted. Auto-layout ignores unconnected text shapes."""
+    return await _worker.run(
+        _client.drop_text, text, x, y, width_in, height_in,
+        font_size_pt, bold, text_color, align, page,
+    )
+
+
+@mcp.tool()
+@_tool_errors
+async def add_container(
+    label: str,
+    member_ids: list[int],
+    master: Optional[str] = None,
+    padding_in: float = 0.4,
+    page: Optional[str] = None,
+) -> dict:
+    """Wrap existing shapes in a real Visio container (for VNets, VPCs,
+    subnets, resource groups, trust zones). The container is sized around its
+    members plus padding, and members MOVE WITH the container afterwards.
+    Nest zones by creating inner containers first, then outer ones.
+
+    Args:
+        label: Container heading text.
+        member_ids: shape_ids to place inside.
+        master: Optional container style name from Visio's built-in container
+            stencil (defaults to the first available style).
+    """
+    return await _worker.run(
+        _client.add_container, label, member_ids, master, padding_in, page
+    )
+
+
+@mcp.tool()
+@_tool_errors
+async def container_members(
+    action: Literal["add", "remove"],
+    container_id: int,
+    member_ids: list[int],
+    page: Optional[str] = None,
+) -> dict:
+    """Add shapes to or remove shapes from an existing container."""
+    return await _worker.run(
+        _client.container_members, action, container_id, member_ids, page
+    )
+
+
+@mcp.tool()
+@_tool_errors
 async def get_page_state(page: Optional[str] = None) -> dict:
     """List everything on a page: shape ids, master names, positions (inches,
-    center), sizes, text, and connector endpoints (from_id/to_id). Call this
-    to (re)discover shape ids, e.g. after open_document."""
+    center), sizes, text, connector endpoints (from_id/to_id), and container
+    membership (container_ids). Call this to (re)discover shape ids, e.g.
+    after open_document."""
     return await _worker.run(_client.get_page_state, page)
 
 

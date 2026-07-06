@@ -19,14 +19,17 @@ cd C:\tools\visio_mcp
 uv sync
 ```
 
-### Optional: install Azure / AWS stencils
+### Azure / AWS icons
 
-For cloud architecture diagrams with official icons, download the stencil packs and unzip them into your **My Shapes** folder (usually `Documents\My Shapes`):
+**Check Visio's built-in templates first.** Recent Microsoft 365 versions of Visio ship dedicated **Azure Diagrams** and **AWS Diagrams** templates, each bundling 20+ stencils of official icons — no downloads needed. See [Create Azure diagrams in Visio](https://support.microsoft.com/en-us/visio/create-azure-diagrams-in-visio) and [Create AWS diagrams in Visio](https://support.microsoft.com/en-us/office/create-aws-diagrams-in-visio-138206bf-d10f-4583-9f31-885ce706af49). If your Visio has them, `create_document` with that template loads the stencils automatically.
 
-- **Azure**: search "Microsoft Azure stencils Visio download" (Microsoft publishes `.vssx` icon sets)
-- **AWS**: search "AWS shapes Visio toolkit" (AWS publishes `.vssx` sets)
+Otherwise, download stencil packs and unzip the `.vssx` files into your **My Shapes** folder (`visio_status` reports the exact path, typically `Documents\My Shapes`):
 
-The server finds them automatically — `visio_status` reports the exact My Shapes path, and `open_stencil("azure")` fuzzy-matches files there.
+- **Azure (official icons)**: [Azure architecture icons](https://learn.microsoft.com/en-us/azure/architecture/icons/) — Microsoft now publishes SVGs; for ready-made Visio stencils use the actively maintained community packs below.
+- **Azure (community `.vssx` packs)**: [Microsoft Integration and Azure Stencils Pack](https://github.com/sandroasp/Microsoft-Integration-and-Azure-Stencils-Pack-for-Visio) (Sandro Pereira, includes `MIS Azure Stencils.vssx` and many more) or [Azure-Design](https://github.com/David-Summers/Azure-Design) (David Summers).
+- **AWS**: [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/) — the asset package includes Visio-compatible formats; community `.vssx` conversions are also linked from that page.
+
+`open_stencil("azure")` fuzzy-matches any `.vssx`/`.vss` file under My Shapes, and `find_masters("virtual machine")` searches inside whatever is open.
 
 ### Smoke test
 
@@ -56,12 +59,15 @@ Then ask Claude something like: *"Draw a 5-step login flowchart in Visio and sho
 | `find_masters` | Search droppable shapes across open stencils |
 | `drop_shape` / `drop_shapes` | Drop masters at (x, y) inches with optional text/size |
 | `update_shape` / `style_shape` / `delete_shapes` | Edit text/position/size, colors/fonts, delete |
-| `connect_shapes` | Glued dynamic connector with label, arrows, right-angle/straight/curved routing |
+| `connect_shapes` | Glued dynamic connector: label, arrows, right-angle/straight/curved routing, solid/dashed/dotted patterns, weight, color |
+| `add_container` / `container_members` | Wrap shapes in real Visio containers (VNets, VPCs, subnets, trust zones) — members move with the container |
+| `drop_text` | Text-only labels (no border/fill) for titles, legends, and callouts |
+| `set_page_size` | Resize the page (or fit to contents) — do this before wide architecture diagrams |
 | `pages` | List/add/activate pages |
 | `auto_layout` | Visio's automatic layout (flowchart top-bottom/left-right, tree, radial, circular) |
-| `get_page_state` | Everything on a page: ids, masters, positions, text, connector endpoints |
+| `get_page_state` | Everything on a page: ids, masters, positions, text, connector endpoints, container membership |
 
-**Coordinate system**: inches, origin at the page **bottom-left**, y grows upward, and drop coordinates are the shape's **center**. Rough placement is fine — finish with `auto_layout`.
+**Coordinate system**: inches, origin at the page **bottom-left**, y grows upward, and drop coordinates are the shape's **center**. Rough placement is fine — finish with `auto_layout`. The default page is US Letter (8.5×11): call `set_page_size` first for wide architecture diagrams, since PNG export crops to the page bounds.
 
 ## Architecture
 
@@ -99,4 +105,4 @@ uv run pytest
 
 - Agent skills encoding Azure/AWS diagram conventions (zones/containers, brand colors, icon naming)
 - Optional HTTP transport to drive a Windows Visio box from another machine
-- Containers/groups via Visio's built-in container stencils
+- A `scripts/install_stencils.py` helper that downloads stencil packs into My Shapes

@@ -425,11 +425,18 @@ class VisioClient:
         line_weight_pt: Optional[float] = None,
         font_size_pt: Optional[float] = None,
         bold: Optional[bool] = None,
+        line_pattern: Optional[str] = None,
     ) -> dict:
+        if line_pattern is not None and line_pattern not in C.LINE_PATTERNS:
+            raise VisioMcpError(
+                f"line_pattern must be one of {sorted(C.LINE_PATTERNS)}, got {line_pattern!r}"
+            )
         page = self._page(page_name)
         shape = self._shape_by_id(page, shape_id)
 
         def _apply():
+            if line_pattern is not None:
+                shape.CellsU("LinePattern").ResultIU = C.LINE_PATTERNS[line_pattern]
             if fill_color is not None:
                 shape.CellsU("FillForegnd").FormulaU = hex_to_rgb_formula(fill_color)
             if line_color is not None:
@@ -466,10 +473,17 @@ class VisioClient:
         end_arrow: bool = True,
         begin_arrow: bool = False,
         page_name: Optional[str] = None,
+        line_pattern: str = "solid",
+        line_weight_pt: Optional[float] = None,
+        line_color: Optional[str] = None,
     ) -> dict:
         if route not in C.CONNECTOR_ROUTES:
             raise VisioMcpError(
                 f"route must be one of {sorted(C.CONNECTOR_ROUTES)}, got {route!r}"
+            )
+        if line_pattern not in C.LINE_PATTERNS:
+            raise VisioMcpError(
+                f"line_pattern must be one of {sorted(C.LINE_PATTERNS)}, got {line_pattern!r}"
             )
         app = self._app()
         page = self._page(page_name)
@@ -491,6 +505,12 @@ class VisioClient:
             conn.CellsU("BeginArrow").FormulaU = str(
                 C.ARROW_FILLED_TRIANGLE if begin_arrow else C.ARROW_NONE
             )
+            # always set: an explicit 'solid' must override themed defaults
+            conn.CellsU("LinePattern").ResultIU = C.LINE_PATTERNS[line_pattern]
+            if line_weight_pt is not None:
+                conn.CellsU("LineWeight").FormulaU = f"{line_weight_pt} pt"
+            if line_color is not None:
+                conn.CellsU("LineColor").FormulaU = hex_to_rgb_formula(line_color)
             if label:
                 conn.Text = label
             return conn
@@ -536,6 +556,201 @@ class VisioClient:
             return {"active_page": str(page.Name)}
         raise VisioMcpError(f"Unknown pages action {action!r}; use list, add, or activate.")
 
+    # -- page size / text / containers ------------------------------------------
+
+    def set_page_size(
+        self,
+        width_in: Optional[float] = None,
+        height_in: Optional[float] = None,
+        orientation: Optional[str] = None,
+        fit_to_contents: bool = False,
+        page_name: Optional[str] = None,
+    ) -> dict:
+        # validate everything BEFORE mutating the document
+        if orientation not in (None, "portrait", "landscape"):
+            raise VisioMcpError(
+                f"orientation must be 'portrait' or 'landscape', got {orientation!r}"
+            )
+        for name, value in (("width_in", width_in), ("height_in", height_in)):
+            if value is not None and value <= 0:
+                raise VisioMcpError(f"{name} must be positive, got {value}")
+        page = self._page(page_name)
+
+        def _apply():
+            sheet = page.PageSheet
+            if fit_to_contents:
+                page.ResizeToFitContents()
+            if width_in is not None:
+                sheet.CellsU("PageWidth").ResultIU = width_in
+            if height_in is not None:
+                sheet.CellsU("PageHeight").ResultIU = height_in
+            w = float(sheet.CellsU("PageWidth").ResultIU)
+            h = float(sheet.CellsU("PageHeight").ResultIU)
+            if orientation == "landscape" or (orientation is None and w > h):
+                sheet.CellsU("PrintPageOrientation").ResultIU = C.ORIENTATION_LANDSCAPE
+            else:
+                sheet.CellsU("PrintPageOrientation").ResultIU = C.ORIENTATION_PORTRAIT
+            return [round(w, 3), round(h, 3)]
+
+        size = self._guard("setting page size", _apply)
+        return {"page": str(page.Name), "page_size_in": size}
+
+    def drop_text(
+        self,
+        text: str,
+        x: float,
+        y: float,
+        width_in: Optional[float] = None,
+        height_in: Optional[float] = None,
+        font_size_pt: float = 10.0,
+        bold: bool = False,
+        text_color: Optional[str] = None,
+        align: str = "center",
+        page_name: Optional[str] = None,
+    ) -> dict:
+        aligns = {"left": C.ALIGN_LEFT, "center": C.ALIGN_CENTER, "right": C.ALIGN_RIGHT}
+        if align not in aligns:
+            raise VisioMcpError(f"align must be one of {sorted(aligns)}, got {align!r}")
+        if not text.strip():
+            raise VisioMcpError("text must not be empty")
+        for name, value in (("width_in", width_in), ("height_in", height_in)):
+            if value is not None and value <= 0:
+                raise VisioMcpError(f"{name} must be positive, got {value}")
+        page = self._page(page_name)
+        # rough auto-size from the longest line when no explicit size given
+        longest = max(len(line) for line in text.splitlines())
+        w = width_in if width_in is not None else max(1.0, longest * font_size_pt * 0.009)
+        h = height_in if height_in is not None else max(0.3, len(text.splitlines()) * font_size_pt * 0.02)
+
+        def _drop():
+            # Visio's standard text-only shape: a borderless, unfilled rectangle
+            shape = page.DrawRectangle(x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+            shape.CellsU("LinePattern").ResultIU = 0
+            shape.CellsU("FillPattern").ResultIU = 0
+            shape.Text = text
+            shape.CellsU("Char.Size").FormulaU = f"{font_size_pt} pt"
+            if bold:
+                cell = shape.CellsU("Char.Style")
+                cell.ResultIU = int(cell.ResultIU) | 1
+            if text_color is not None:
+                shape.CellsU("Char.Color").FormulaU = hex_to_rgb_formula(text_color)
+            shape.CellsU("Para.HorzAlign").ResultIU = aligns[align]
+            return shape
+
+        shape = self._guard("dropping text", _drop)
+        return {**self._shape_info(shape), "is_text": True}
+
+    def _container_master(self, master_name: Optional[str]):
+        app = self._app()
+        path = self._guard(
+            "locating the built-in container stencil",
+            lambda: app.GetBuiltInStencilFile(C.VIS_STENCIL_CONTAINERS, C.VIS_MS_US),
+        )
+        # reuse the stencil if already open — reopening an open stencil can
+        # raise on real Visio
+        base = os.path.basename(str(path))
+        stencil = next(
+            (d for d in self._stencil_docs() if str(d.Name) == base), None
+        )
+        if stencil is None:
+            stencil = self._guard(
+                "opening the built-in container stencil",
+                lambda: app.Documents.OpenEx(path, C.STENCIL_OPEN_FLAGS),
+            )
+        if master_name:
+            return self._find_master(master_name, stencil=str(stencil.Name))
+        return stencil.Masters.Item(1)
+
+    def add_container(
+        self,
+        label: str,
+        member_ids: list[int],
+        master: Optional[str] = None,
+        padding_in: float = 0.4,
+        page_name: Optional[str] = None,
+    ) -> dict:
+        if not member_ids:
+            raise VisioMcpError("member_ids must list at least one shape to contain")
+        app = self._app()
+        page = self._page(page_name)
+        members = [self._shape_by_id(page, sid) for sid in member_ids]
+        container_master = self._container_master(master)
+
+        def _build():
+            # bounding box of the members, in page coordinates; the local pin
+            # is not necessarily the shape center (icon masters often anchor
+            # bottom-center), so subtract LocPin rather than assuming Width/2
+            lefts, rights, bottoms, tops = [], [], [], []
+            for m in members:
+                left = float(m.CellsU("PinX").ResultIU) - float(m.CellsU("LocPinX").ResultIU)
+                bottom = float(m.CellsU("PinY").ResultIU) - float(m.CellsU("LocPinY").ResultIU)
+                lefts.append(left)
+                rights.append(left + float(m.CellsU("Width").ResultIU))
+                bottoms.append(bottom)
+                tops.append(bottom + float(m.CellsU("Height").ResultIU))
+            cx = (min(lefts) + max(rights)) / 2
+            cy = (min(bottoms) + max(tops)) / 2
+            container = page.Drop(container_master, cx, cy)
+            container.CellsU("Width").ResultIU = max(rights) - min(lefts) + 2 * padding_in
+            container.CellsU("Height").ResultIU = max(tops) - min(bottoms) + 2 * padding_in
+            container.Text = label
+            props = container.ContainerProperties
+            if props is None:
+                raise VisioMcpError(
+                    "The dropped shape is not a Visio container — try a different "
+                    "container master."
+                )
+            for m in members:
+                props.AddMember(m, C.VIS_MEMBER_ADD_EXPAND_CONTAINER)
+            # Drop puts the container on top of its members; push it behind
+            # them so an opaque container fill can't hide the shapes
+            container.SendToBack()
+            return container
+
+        # one undo scope so a mid-build failure can't leave an orphan container
+        scope = self._guard("starting undo scope", lambda: app.BeginUndoScope("Add container"))
+        try:
+            container = self._guard(f"creating container {label!r}", _build)
+            self._guard("closing undo scope", lambda: app.EndUndoScope(scope, True))
+        except Exception:
+            try:
+                app.EndUndoScope(scope, False)  # False = roll the drop back
+            except Exception:
+                pass
+            raise
+        return {**self._shape_info(container), "member_ids": member_ids}
+
+    def container_members(
+        self,
+        action: str,
+        container_id: int,
+        member_ids: list[int],
+        page_name: Optional[str] = None,
+    ) -> dict:
+        if action not in ("add", "remove"):
+            raise VisioMcpError(f"action must be 'add' or 'remove', got {action!r}")
+        if not member_ids:
+            raise VisioMcpError("member_ids must not be empty")
+        page = self._page(page_name)
+        container = self._shape_by_id(page, container_id)
+        members = [self._shape_by_id(page, sid) for sid in member_ids]
+
+        def _apply():
+            props = container.ContainerProperties
+            if props is None:
+                raise VisioMcpError(
+                    f"Shape {container_id} is not a container — create one with "
+                    "add_container."
+                )
+            for m in members:
+                if action == "add":
+                    props.AddMember(m, C.VIS_MEMBER_ADD_EXPAND_CONTAINER)
+                else:
+                    props.RemoveMember(m)
+
+        self._guard(f"{'adding' if action == 'add' else 'removing'} container members", _apply)
+        return {"container_id": container_id, "action": action, "member_ids": member_ids}
+
     # -- layout / introspection ------------------------------------------------
 
     def auto_layout(
@@ -580,6 +795,15 @@ class VisioClient:
             except Exception:
                 pass
             info["is_connector"] = is_connector
+            try:
+                containers = shape.MemberOfContainers
+                info["container_ids"] = [int(c) for c in containers] if containers else []
+            except Exception:
+                info["container_ids"] = []
+            try:
+                info["is_container"] = shape.ContainerProperties is not None
+            except Exception:
+                info["is_container"] = False
             if is_connector:
                 from_id = to_id = None
                 try:

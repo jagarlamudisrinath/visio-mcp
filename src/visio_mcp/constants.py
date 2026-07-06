@@ -69,6 +69,26 @@ AUTOCONNECT_NONE = 0
 ARROW_NONE = 0
 ARROW_FILLED_TRIANGLE = 5
 
+# --- LinePattern cell values ------------------------------------------------
+LINE_PATTERNS: dict[str, int] = {
+    "solid": 1,
+    "dashed": 2,
+    "dotted": 3,
+    "dash_dot": 4,
+}
+
+# --- PrintPageOrientation cell values ----------------------------------------
+ORIENTATION_PORTRAIT = 1
+ORIENTATION_LANDSCAPE = 2
+
+# --- VisMemberAddOptions (ContainerProperties.AddMember) ---------------------
+VIS_MEMBER_ADD_EXPAND_CONTAINER = 1
+
+# --- Paragraph HorzAlign cell values -----------------------------------------
+ALIGN_LEFT = 0
+ALIGN_CENTER = 1
+ALIGN_RIGHT = 2
+
 # --- HRESULTs we branch on -------------------------------------------------
 MK_E_UNAVAILABLE = -2147221021  # GetActiveObject: no running instance
 CO_E_CLASSSTRING = -2147221005  # invalid class string: Visio not installed

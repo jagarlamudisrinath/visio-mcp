@@ -72,6 +72,41 @@ class FakeConnect:
         self.ToSheet = to_sheet
 
 
+class FakeLocPinCell:
+    """LocPin defaults to the shape center via formula in real Visio: track
+    Width/Height unless explicitly overridden."""
+
+    def __init__(self, shape, name):
+        self.shape = shape
+        self.Name = name
+        self.FormulaU = ""
+        self._override = None
+
+    @property
+    def ResultIU(self):
+        if self._override is not None:
+            return self._override
+        dim = "Width" if self.Name == "LocPinX" else "Height"
+        return self.shape.CellsU(dim).ResultIU / 2
+
+    @ResultIU.setter
+    def ResultIU(self, value):
+        self._override = value
+
+
+class FakeContainerProperties:
+    def __init__(self, container):
+        self._container = container
+
+    def AddMember(self, shape, flags):
+        if self._container.ID not in shape.member_of:
+            shape.member_of.append(self._container.ID)
+
+    def RemoveMember(self, shape):
+        if self._container.ID in shape.member_of:
+            shape.member_of.remove(self._container.ID)
+
+
 class FakeShape:
     def __init__(self, page, shape_id, master=None, x=0.0, y=0.0):
         self.page = page
@@ -81,6 +116,8 @@ class FakeShape:
         self.Text = ""
         self.OneD = 0
         self.connects: list[FakeConnect] = []
+        self.member_of: list[int] = []
+        self.ContainerProperties = None
         self._cells: dict[str, FakeCell] = {}
         self.CellsU("PinX").ResultIU = x
         self.CellsU("PinY").ResultIU = y
@@ -89,12 +126,23 @@ class FakeShape:
 
     def CellsU(self, name):
         if name not in self._cells:
-            self._cells[name] = FakeCell(self, name)
+            if name in ("LocPinX", "LocPinY"):
+                self._cells[name] = FakeLocPinCell(self, name)
+            else:
+                self._cells[name] = FakeCell(self, name)
         return self._cells[name]
 
     @property
     def Connects(self):
         return FakeCollection(self.connects)
+
+    @property
+    def MemberOfContainers(self):
+        return tuple(self.member_of)
+
+    def SendToBack(self):
+        self.page.shapes.remove(self)
+        self.page.shapes.insert(0, self)
 
     def Delete(self):
         self.page.shapes.remove(self)
@@ -153,9 +201,21 @@ class FakePage:
         if isinstance(master_or_dataobject, FakeMaster):
             shape.Master = master_or_dataobject
             shape.NameU = f"{master_or_dataobject.NameU}.{shape.ID}"
+            if getattr(master_or_dataobject, "is_container", False):
+                shape.ContainerProperties = FakeContainerProperties(shape)
         else:  # ConnectorToolDataObject
             shape.OneD = 1
             shape.Master = None
+        self.shapes.append(shape)
+        return shape
+
+    def DrawRectangle(self, x1, y1, x2, y2):
+        shape = FakeShape(self, self._next_id, master=None,
+                          x=(x1 + x2) / 2, y=(y1 + y2) / 2)
+        self._next_id += 1
+        shape.NameU = f"Sheet.{shape.ID}"
+        shape.CellsU("Width").ResultIU = abs(x2 - x1)
+        shape.CellsU("Height").ResultIU = abs(y2 - y1)
         self.shapes.append(shape)
         return shape
 
@@ -223,6 +283,7 @@ class FakeDocuments:
     def __init__(self, app):
         self._app = app
         self._coll = FakeCollection()
+        self.open_ex_calls: list[str] = []
 
     @property
     def Count(self):
@@ -250,14 +311,23 @@ class FakeDocuments:
         return doc
 
     def OpenEx(self, name, flags):
+        self.open_ex_calls.append(name)
         stencil_masters = self._app.known_stencils.get(name) or self._app.known_stencils.get(
             os.path.basename(name)
         )
         if stencil_masters is None:
             raise com_error(-2032465756, f"stencil not found: {name}")
-        doc = FakeDocument(self._app, os.path.basename(name), doc_type=2, path=os.path.dirname(name))
+        base = os.path.basename(name)
+        requested_dir = os.path.dirname(name)
+        for d in self._coll._list:  # real Visio reuses an already-open stencil
+            if d.Type == 2 and d.Name == base and (not requested_dir or d.Path == requested_dir):
+                return d
+        doc = FakeDocument(self._app, base, doc_type=2, path=os.path.dirname(name))
+        is_container_stencil = "container" in base.lower()
         for master_name in stencil_masters:
-            doc.Masters.append(FakeMaster(master_name))
+            master = FakeMaster(master_name)
+            master.is_container = is_container_stencil
+            doc.Masters.append(master)
         self._coll.append(doc)
         # stencils open docked: they do NOT become the active document
         return doc
@@ -280,7 +350,13 @@ class FakeApplication:
         self.known_templates = {"BASFLO_U.VSTX", "BASFLO_M.VSTX"}
         self.known_stencils = {
             "BASFLO_U.VSSX": ["Process", "Decision", "Start/End", "Document", "Data"],
+            "CONTAINER_U.VSSX": ["Plain", "Container 1", "Container 2"],
         }
+
+    def GetBuiltInStencilFile(self, stencil_type, measurement):
+        if stencil_type == 2:  # visBuiltInStencilContainers
+            return "CONTAINER_U.VSSX"
+        raise com_error(-2032465756, f"no built-in stencil of type {stencil_type}")
 
     def BeginUndoScope(self, name):
         scope = self._next_scope

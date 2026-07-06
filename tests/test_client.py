@@ -232,6 +232,171 @@ def test_open_document_roundtrip(client, app, tmp_path):
         client.open_document(str(tmp_path / "missing.vsdx"))
 
 
+def test_connector_line_pattern_weight_color(client, app):
+    _build_flowchart(client)
+    client.connect_shapes(1, 2, line_pattern="dashed", line_weight_pt=2,
+                          line_color="#808080")
+    conn = app.ActivePage.shapes[-1]
+    assert conn.CellsU("LinePattern").ResultIU == 2
+    assert conn.CellsU("LineWeight").FormulaU == "2 pt"
+    assert conn.CellsU("LineColor").FormulaU == "RGB(128,128,128)"
+    with pytest.raises(VisioMcpError, match="line_pattern"):
+        client.connect_shapes(1, 2, line_pattern="wavy")
+
+
+def test_style_shape_line_pattern(client, app):
+    _build_flowchart(client)
+    client.style_shape(1, line_pattern="dotted")
+    assert app.ActivePage.shapes[0].CellsU("LinePattern").ResultIU == 3
+    with pytest.raises(VisioMcpError, match="line_pattern"):
+        client.style_shape(1, line_pattern="zigzag")
+
+
+def test_set_page_size_explicit_and_orientation(client, app):
+    client.create_document()
+    result = client.set_page_size(20, 12)
+    assert result["page_size_in"] == [20, 12]
+    sheet = app.ActivePage.PageSheet
+    assert sheet.CellsU("PrintPageOrientation").ResultIU == 2  # landscape inferred
+    client.set_page_size(orientation="portrait")
+    assert sheet.CellsU("PrintPageOrientation").ResultIU == 1
+
+
+def test_set_page_size_fit_to_contents(client, app):
+    _build_flowchart(client)
+    client.set_page_size(fit_to_contents=True)
+    assert app.ActivePage.resize_calls == 1
+
+
+def test_drop_text_creates_borderless_unfilled_label(client, app):
+    client.create_document()
+    result = client.drop_text("Hybrid Cloud Reference", 5, 10.5,
+                              font_size_pt=18, bold=True, text_color="#333333",
+                              align="left")
+    shape = app.ActivePage.shapes[0]
+    assert result["is_text"] is True
+    assert result["text"] == "Hybrid Cloud Reference"
+    assert (result["x"], result["y"]) == (5, 10.5)
+    assert shape.CellsU("LinePattern").ResultIU == 0
+    assert shape.CellsU("FillPattern").ResultIU == 0
+    assert shape.CellsU("Char.Size").FormulaU == "18 pt"
+    assert int(shape.CellsU("Char.Style").ResultIU) & 1
+    assert shape.CellsU("Char.Color").FormulaU == "RGB(51,51,51)"
+    assert shape.CellsU("Para.HorzAlign").ResultIU == 0
+    with pytest.raises(VisioMcpError, match="align"):
+        client.drop_text("x", 1, 1, align="justified")
+    with pytest.raises(VisioMcpError, match="empty"):
+        client.drop_text("   ", 1, 1)
+
+
+def test_add_container_wraps_members_and_reports_membership(client, app):
+    _build_flowchart(client)
+    result = client.add_container("VNet", [1, 2])
+    # SendToBack: the container must sit behind its members in z-order
+    container = app.ActivePage.shapes[0]
+    assert result["shape_id"] == container.ID
+    assert result["member_ids"] == [1, 2]
+    assert container.Text == "VNet"
+    assert container.ContainerProperties is not None
+    assert app.undo_scopes[-1][1] is True, "add_container must commit its undo scope"
+    # bbox of members (both 1.0x0.75 at x=4, y in {9,7}) + 0.4 padding
+    assert result["x"] == 4
+    assert result["y"] == 8
+    assert result["width_in"] == pytest.approx(1.0 + 0.8)
+    assert result["height_in"] == pytest.approx(2.75 + 0.8)
+    state = client.get_page_state()
+    by_id = {s["shape_id"]: s for s in state["shapes"]}
+    assert by_id[1]["container_ids"] == [container.ID]
+    assert by_id[3]["container_ids"] == []
+    assert by_id[container.ID]["is_container"] is True
+
+
+def test_container_members_add_remove(client, app):
+    _build_flowchart(client)
+    container_id = client.add_container("Zone", [1])["shape_id"]
+    client.container_members("add", container_id, [2, 3])
+    state = {s["shape_id"]: s for s in client.get_page_state()["shapes"]}
+    assert state[2]["container_ids"] == [container_id]
+    client.container_members("remove", container_id, [2])
+    state = {s["shape_id"]: s for s in client.get_page_state()["shapes"]}
+    assert state[2]["container_ids"] == []
+    with pytest.raises(VisioMcpError, match="not a container"):
+        client.container_members("add", 1, [2])
+    with pytest.raises(VisioMcpError, match="add.*remove"):
+        client.container_members("move", container_id, [2])
+
+
+def test_add_container_requires_members(client):
+    _build_flowchart(client)
+    with pytest.raises(VisioMcpError, match="at least one"):
+        client.add_container("Empty", [])
+
+
+def test_add_container_reuses_open_container_stencil(client, app):
+    _build_flowchart(client)
+    client.add_container("Outer", [1])
+    client.add_container("Inner", [2])
+    container_opens = [n for n in app.Documents.open_ex_calls if "CONTAINER" in n.upper()]
+    assert len(container_opens) == 1, "built-in container stencil must be opened once"
+
+
+def test_add_container_failure_rolls_back_undo_scope(client, app):
+    _build_flowchart(client)
+    # make the built-in container stencil produce NON-container masters so
+    # the post-drop 'is it really a container?' check fails mid-build
+    app.known_stencils["BOXES_U.VSSX"] = ["Plain box"]
+    app.GetBuiltInStencilFile = lambda t, m: "BOXES_U.VSSX"
+    with pytest.raises(VisioMcpError, match="not a Visio container"):
+        client.add_container("Zone", [1])
+    assert app.undo_scopes[-1][1] is False, "failed add_container must roll back"
+
+
+def test_add_container_ambiguous_master_is_rejected(client):
+    _build_flowchart(client)
+    with pytest.raises(VisioMcpError, match="ambiguous"):
+        client.add_container("Zone", [1], master="container")
+    result = client.add_container("Zone", [1], master="Container 1")
+    assert result["member_ids"] == [1]
+
+
+def test_add_container_bbox_respects_off_center_pin(client, app):
+    _build_flowchart(client)
+    # simulate an icon master anchored at bottom-left: LocPin (0, 0) means the
+    # shape body extends from Pin to Pin+Width/Height
+    shape = app.ActivePage.shapes[0]  # 1.0 x 0.75 at pin (4, 9)
+    shape.CellsU("LocPinX").ResultIU = 0
+    shape.CellsU("LocPinY").ResultIU = 0
+    result = client.add_container("Zone", [1], padding_in=0.5)
+    assert result["x"] == pytest.approx(4.5)   # (4 + 5) / 2
+    assert result["y"] == pytest.approx(9.375)  # (9 + 9.75) / 2
+    assert result["width_in"] == pytest.approx(2.0)
+    assert result["height_in"] == pytest.approx(1.75)
+
+
+def test_set_page_size_validates_before_mutating(client, app):
+    client.create_document()
+    with pytest.raises(VisioMcpError, match="orientation"):
+        client.set_page_size(20, 12, orientation="diagonal")
+    sheet = app.ActivePage.PageSheet
+    assert sheet.CellsU("PageWidth").ResultIU == 8.5, "page must not be resized on invalid input"
+    with pytest.raises(VisioMcpError, match="positive"):
+        client.set_page_size(-3)
+
+
+def test_drop_text_rejects_zero_size(client):
+    client.create_document()
+    with pytest.raises(VisioMcpError, match="positive"):
+        client.drop_text("Title", 1, 1, width_in=0)
+
+
+def test_connector_explicit_solid_sets_line_pattern(client, app):
+    _build_flowchart(client)
+    client.connect_shapes(1, 2, line_pattern="solid")
+    conn = app.ActivePage.shapes[-1]
+    assert conn.CellsU("LinePattern").ResultIU == 1, \
+        "explicit solid must be written to override themed defaults"
+
+
 def test_reattaches_if_user_quit_visio(app):
     """If the cached app proxy dies, the client transparently reattaches."""
     apps = [app, FakeApplication()]
