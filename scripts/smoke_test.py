@@ -142,12 +142,18 @@ def main() -> int:
     def container():
         b, c = state["ids"][1], state["ids"][2]
         result = call(client.add_container, "Validation zone", [b, c])
+        state["container_id"] = result["shape_id"]
         page_state = call(client.get_page_state)
         members = {s["shape_id"] for s in page_state["shapes"]
                    if result["shape_id"] in s.get("container_ids", [])}
         assert {b, c} <= members, "container membership did not round-trip"
 
-    @step(11, "auto-layout flowchart_tb moves shapes")
+    @step(11, "style_shape recolors the container despite theme cell guards")
+    def style_container():
+        call(client.style_shape, state["container_id"],
+             None, "#E6F2FB", "#0072C6", None, None, None, None, None)
+
+    @step(12, "auto-layout flowchart_tb moves shapes")
     def layout():
         before = {s["shape_id"]: (s["x"], s["y"])
                   for s in call(client.get_page_state)["shapes"]}
@@ -156,37 +162,45 @@ def main() -> int:
                  for s in call(client.get_page_state)["shapes"]}
         assert before != after, "layout did not move anything (may be OK, eyeball the PNG)"
 
-    @step(12, "export page PNG")
+    @step(13, "export page PNG")
     def export():
         result = call(client.export_page_png, png_path)
         assert os.path.getsize(result["path"]) > 1024, "PNG suspiciously small"
         os.startfile(result["path"])  # noqa: S606 — open for eyeball check
 
-    @step(13, "save .vsdx, reopen it, shapes survive")
+    @step(14, "save .vsdx, reopen it, shapes survive")
     def save_reopen():
         call(client.save_document, vsdx_path)
         call(client.open_document, vsdx_path)
         page_state = call(client.get_page_state)
         assert len(page_state["shapes"]) >= 9, "shapes lost in save/reopen round-trip"
 
-    @step(14, "optional: Azure/AWS stencils under My Shapes")
+    @step(15, "Azure/AWS stencils: built-in Visio Content, then My Shapes")
     def cloud_stencils():
         import glob
 
         s = call(client.status)
+        builtin = s.get("builtin_cloud_stencils", [])
+        if builtin:
+            print(f"      Visio ships {len(builtin)} built-in Azure/AWS stencils "
+                  f"under {s['builtin_stencils_path']}")
+            info = call(client.open_stencil, builtin[0])
+            print(f"      opened built-in {info['stencil']} with "
+                  f"{info['master_count']} masters")
+            return
         hits = [p for pat in ("*azure*", "*aws*", "*Azure*", "*AWS*")
                 for p in glob.glob(os.path.join(s["my_shapes_path"], "**", pat + ".vss*"),
                                    recursive=True)]
         if not hits:
-            print("      (no Azure/AWS stencils found in My Shapes — skipping; "
-                  "download them to enable cloud icons)")
+            print("      (no Azure/AWS stencils in the built-in content folder or "
+                  "My Shapes — download packs into My Shapes to enable cloud icons)")
             return
         info = call(client.open_stencil, hits[0])
         print(f"      opened {info['stencil']} with {info['master_count']} masters")
 
     for fn in (check_constants, status, create, stencil, drop, connect,
                style, dashed_connector, page_size, text_label, container,
-               layout, export, save_reopen, cloud_stencils):
+               style_container, layout, export, save_reopen, cloud_stencils):
         fn()
 
     worker.shutdown(release=client.release)

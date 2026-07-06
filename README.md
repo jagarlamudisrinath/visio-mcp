@@ -21,9 +21,11 @@ uv sync
 
 ### Azure / AWS icons
 
-**Check Visio's built-in templates first.** Recent Microsoft 365 versions of Visio ship dedicated **Azure Diagrams** and **AWS Diagrams** templates, each bundling 20+ stencils of official icons — no downloads needed. See [Create Azure diagrams in Visio](https://support.microsoft.com/en-us/visio/create-azure-diagrams-in-visio) and [Create AWS diagrams in Visio](https://support.microsoft.com/en-us/office/create-aws-diagrams-in-visio-138206bf-d10f-4583-9f31-885ce706af49). If your Visio has them, `create_document` with that template loads the stencils automatically.
+**Visio ships them built-in — no downloads needed.** Visio 16 / Microsoft 365 installs include ~130 stencils (Azure, AWS, networking, and more) under `<Office install>\root\Office16\Visio Content\<locale>\` — e.g. `AZURESTORAGE_U.VSSX`, `AWSSTORAGE_U.VSSX`. They resolve by bare filename, so `open_stencil("AZURESTORAGE_U.VSSX")` (or a fuzzy match like `open_stencil("azurestorage")`) works out of the box. `visio_status` lists them in `builtin_cloud_stencils`, and there are also dedicated **Azure Diagrams** / **AWS Diagrams** templates ([Azure](https://support.microsoft.com/en-us/visio/create-azure-diagrams-in-visio), [AWS](https://support.microsoft.com/en-us/office/create-aws-diagrams-in-visio-138206bf-d10f-4583-9f31-885ce706af49)) that `create_document` can start from.
 
-Otherwise, download stencil packs and unzip the `.vssx` files into your **My Shapes** folder (`visio_status` reports the exact path, typically `Documents\My Shapes`):
+Some masters go by different names than you might guess — the server auto-resolves common ones (`Private Endpoint` → `Private Link`, `Amazon S3` → `Bucket with Objects`, `IAM` → `Security Identity and Compliance`) and tells you when a concept is a container rather than a master (subnets, VNets, VPCs → `add_container`).
+
+For older Visio versions or extra vendor packs, download stencils and unzip the `.vssx` files into your **My Shapes** folder (`visio_status` reports the exact path, typically `Documents\My Shapes`):
 
 - **Azure (official icons)**: [Azure architecture icons](https://learn.microsoft.com/en-us/azure/architecture/icons/) — Microsoft now publishes SVGs; for ready-made Visio stencils use the actively maintained community packs below.
 - **Azure (community `.vssx` packs)**: [Microsoft Integration and Azure Stencils Pack](https://github.com/sandroasp/Microsoft-Integration-and-Azure-Stencils-Pack-for-Visio) (Sandro Pereira, includes `MIS Azure Stencils.vssx` and many more) or [Azure-Design](https://github.com/David-Summers/Azure-Design) (David Summers).

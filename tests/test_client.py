@@ -397,6 +397,74 @@ def test_connector_explicit_solid_sets_line_pattern(client, app):
         "explicit solid must be written to override themed defaults"
 
 
+def test_status_reports_builtin_stencils(tmp_path):
+    content = tmp_path / "Visio Content" / "1033"
+    content.mkdir(parents=True)
+    for name in ("AZURESTORAGE_U.VSSX", "AWSSTORAGE_U.VSSX", "BASFLO_U.VSSX"):
+        (content / name).write_bytes(b"fake")
+    app = FakeApplication(install_path=str(tmp_path))
+    client = VisioClient(app_factory=lambda: app)
+    result = client.status()
+    assert result["builtin_stencils_path"] == str(tmp_path / "Visio Content")
+    assert result["builtin_stencil_count"] == 3
+    assert result["builtin_cloud_stencils"] == ["AWSSTORAGE_U.VSSX", "AZURESTORAGE_U.VSSX"]
+    assert "no My Shapes install needed" in result["note"]
+
+
+def test_status_without_builtin_content_dir(client):
+    result = client.status()
+    assert result["builtin_stencils_path"] is None
+    assert result["builtin_stencil_count"] == 0
+    assert "download stencil packs" in result["note"].lower()
+
+
+def test_open_stencil_fuzzy_matches_builtin_content(tmp_path):
+    content = tmp_path / "Visio Content" / "1033"
+    content.mkdir(parents=True)
+    stencil_path = content / "AZURESTORAGE_U.VSSX"
+    stencil_path.write_bytes(b"fake")
+    app = FakeApplication(install_path=str(tmp_path))
+    app.known_stencils[str(stencil_path)] = ["Storage Accounts", "Data Lake Storage Gen"]
+    client = VisioClient(app_factory=lambda: app)
+    client.create_document()
+    info = client.open_stencil("azurestorage")
+    assert info["stencil"] == "AZURESTORAGE_U.VSSX"
+    assert info["master_count"] == 2
+
+
+def test_style_shape_forces_through_guarded_container_cells(client, app):
+    _build_flowchart(client)
+    container_id = client.add_container("Subnet", [1, 2])["shape_id"]
+    container = app.ActivePage.Shapes.ItemFromID(container_id)
+    # Visio's built-in container masters guard theme-driven cells
+    container.CellsU("LineColor").guarded = True
+    container.CellsU("FillForegnd").guarded = True
+    client.style_shape(container_id, fill_color="#E6F2FB", line_color="#0072C6")
+    assert container.CellsU("LineColor").FormulaU == "RGB(0,114,198)"
+    assert container.CellsU("FillForegnd").FormulaU == "RGB(230,242,251)"
+    assert container.CellsU("LineColor").forced
+
+
+def test_master_alias_resolves_when_target_present(client, app):
+    client.create_document()
+    app.known_stencils["AZURENETWORKING_U.VSSX"] = ["Private Link", "Virtual Network Gateway"]
+    client.open_stencil("AZURENETWORKING_U.VSSX")
+    result = client.drop_shapes([{"master": "Private Endpoint", "x": 2, "y": 2}])
+    assert result["shapes"][0]["master"] == "Private Link"
+
+
+def test_master_alias_hint_when_target_absent(client):
+    _build_flowchart(client)  # basic flowchart stencil only, no 'Private Link'
+    with pytest.raises(VisioMcpError, match="Private Link"):
+        client.drop_shapes([{"master": "Private Endpoint", "x": 2, "y": 2}])
+
+
+def test_master_hint_for_container_concepts(client):
+    _build_flowchart(client)
+    with pytest.raises(VisioMcpError, match="add_container"):
+        client.drop_shapes([{"master": "Subnet", "x": 2, "y": 2}])
+
+
 def test_reattaches_if_user_quit_visio(app):
     """If the cached app proxy dies, the client transparently reattaches."""
     apps = [app, FakeApplication()]

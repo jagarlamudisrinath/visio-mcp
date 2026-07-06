@@ -53,8 +53,37 @@ class FakeCell:
         self.shape = shape
         self.Name = name
         self.ResultIU = value
-        self.FormulaU = ""
+        self._formula = ""
+        self.guarded = False   # tests set True to mimic container theme cells
+        self.forced = False
         self.glued_to = None
+
+    @property
+    def FormulaU(self):
+        return self._formula
+
+    def _recalc(self, value):
+        try:
+            self.ResultIU = float(value)  # Visio recalculates the cell value
+        except (TypeError, ValueError):
+            pass
+
+    @FormulaU.setter
+    def FormulaU(self, value):
+        if self.guarded:
+            raise com_error(-2147352567, "Cell is guarded.")
+        self._formula = value
+        self._recalc(value)
+
+    @property
+    def FormulaForceU(self):
+        return self._formula
+
+    @FormulaForceU.setter
+    def FormulaForceU(self, value):
+        self._formula = value  # force writes through the guard, like real Visio
+        self.forced = True
+        self._recalc(value)
 
     def GlueTo(self, other_cell):
         self.glued_to = other_cell
@@ -160,11 +189,8 @@ class FakePageSheet:
 
     def CellsU(self, name):
         if name not in self._cells:
-            cell = FakeCell.__new__(FakeCell)
-            cell.Name = name
-            cell.ResultIU = 8.5 if name == "PageWidth" else 11.0 if name == "PageHeight" else 0.0
-            cell.FormulaU = ""
-            self._cells[name] = cell
+            value = 8.5 if name == "PageWidth" else 11.0 if name == "PageHeight" else 0.0
+            self._cells[name] = FakeCell(None, name, value)
         return self._cells[name]
 
 
@@ -334,11 +360,12 @@ class FakeDocuments:
 
 
 class FakeApplication:
-    def __init__(self, my_shapes_path="/tmp/MyShapes"):
+    def __init__(self, my_shapes_path="/tmp/MyShapes", install_path="/tmp/FakeOffice16"):
         self.Version = "16.0 (fake)"
         self.Visible = False
         self.AlertResponse = 0
         self.MyShapesPath = my_shapes_path
+        self.Path = install_path  # Visio install dir; 'Visio Content' lives under it
         self.Documents = FakeDocuments(self)
         self.ActiveDocument = None
         self.ActivePage = None

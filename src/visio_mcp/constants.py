@@ -94,6 +94,32 @@ MK_E_UNAVAILABLE = -2147221021  # GetActiveObject: no running instance
 CO_E_CLASSSTRING = -2147221005  # invalid class string: Visio not installed
 RPC_E_CALL_REJECTED = -2147418111  # Visio busy (modal dialog etc.); retry
 
+# --- Master name aliases -----------------------------------------------------
+# Names agents commonly guess -> the master that actually exists in Visio's
+# built-in Azure/AWS stencils. Consulted by _find_master when a direct lookup
+# misses; keys are lowercase.
+MASTER_ALIASES: dict[str, str] = {
+    "private endpoint": "Private Link",
+    "amazon s3": "Bucket with Objects",
+    "s3": "Bucket with Objects",
+    "s3 bucket": "Bucket with Objects",
+    "iam": "Security Identity and Compliance",
+    "iam user": "Role",
+    "self-hosted ir": "Virtual Machine",
+    "self-hosted integration runtime": "Virtual Machine",
+    "azure ad": "Azure Active Directory",
+    "entra id": "Azure Active Directory",
+}
+
+# Guessed names that are not masters at all -> guidance for the agent.
+MASTER_HINTS: dict[str, str] = {
+    "subnet": "Subnets are drawn as containers, not masters — use add_container.",
+    "vnet": "VNets are drawn as containers, not masters — use add_container.",
+    "vpc": "VPCs are drawn as containers, not masters — use add_container.",
+    "resource group": "Resource groups are drawn as containers — use add_container.",
+    "availability zone": "Availability zones are drawn as containers — use add_container.",
+}
+
 # --- auto_layout style -> (PlaceStyle, RouteStyle) -------------------------
 LAYOUT_STYLES: dict[str, tuple[int, int]] = {
     "flowchart_tb": (PLACE_TOP_TO_BOTTOM, ROUTE_FLOWCHART_TB),

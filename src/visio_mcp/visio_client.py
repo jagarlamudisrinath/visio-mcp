@@ -12,7 +12,6 @@ Rules that keep this correct:
 from __future__ import annotations
 
 import difflib
-import glob
 import os
 import sys
 from typing import Any, Callable, Optional
@@ -37,6 +36,17 @@ def _items(collection):
     """Iterate a 1-based COM collection via Count/Item."""
     for i in range(1, int(collection.Count) + 1):
         yield collection.Item(i)
+
+
+def _stencil_files_under(root: str) -> list[str]:
+    """All .vss/.vssx files under root, case-insensitive (stencil filenames
+    are conventionally uppercase)."""
+    hits = []
+    for dirpath, _, filenames in os.walk(root):
+        for fn in filenames:
+            if fn.lower().endswith((".vssx", ".vss")):
+                hits.append(os.path.join(dirpath, fn))
+    return sorted(hits)
 
 
 def default_app_factory():
@@ -150,6 +160,20 @@ class VisioClient:
 
     # -- status / documents --------------------------------------------------
 
+    def _builtin_content_dir(self) -> Optional[str]:
+        """Visio ships ~130 stencils (incl. Azure/AWS) under
+        <install>\\Visio Content\\<locale>\\ — resolvable by bare filename."""
+        try:
+            base = str(self._app().Path)
+        except Exception:
+            return None
+        root = os.path.join(base, "Visio Content")
+        return root if os.path.isdir(root) else None
+
+    def _builtin_stencil_files(self) -> list[str]:
+        root = self._builtin_content_dir()
+        return _stencil_files_under(root) if root else []
+
     def status(self) -> dict:
         app = self._app()
         docs, stencils = [], []
@@ -167,6 +191,12 @@ class VisioClient:
                 active_page = str(app.ActivePage.Name)
         except Exception:
             pass
+        builtin_files = self._builtin_stencil_files()
+        cloud = [
+            os.path.basename(f)
+            for f in builtin_files
+            if any(k in os.path.basename(f).lower() for k in ("azure", "aws"))
+        ]
         return {
             "visio_version": str(app.Version),
             "documents": docs,
@@ -174,6 +204,16 @@ class VisioClient:
             "active_document": active_doc,
             "active_page": active_page,
             "my_shapes_path": str(app.MyShapesPath),
+            "builtin_stencils_path": self._builtin_content_dir(),
+            "builtin_stencil_count": len(builtin_files),
+            "builtin_cloud_stencils": cloud[:60],
+            "note": (
+                "Built-in stencils open by bare filename, e.g. "
+                "open_stencil('AZURESTORAGE_U.VSSX') — no My Shapes install needed."
+                if cloud else
+                "No built-in Azure/AWS stencils detected; download stencil packs "
+                "into the My Shapes folder for cloud icons."
+            ),
         }
 
     def create_document(self, template: Optional[str] = None, measurement: str = "us") -> dict:
@@ -254,11 +294,12 @@ class VisioClient:
             if "." not in os.path.basename(query):
                 candidates.append(os.path.join(my_shapes, query + ".vssx"))
                 candidates.append(os.path.join(my_shapes, query + ".vss"))
-            # last resort: fuzzy filename match anywhere under My Shapes
-            for ext in ("vssx", "vss"):
-                for hit in sorted(glob.glob(os.path.join(my_shapes, "**", f"*.{ext}"), recursive=True)):
-                    if query.lower() in os.path.basename(hit).lower():
-                        candidates.append(hit)
+            # last resort: fuzzy filename match under My Shapes, then Visio's
+            # built-in content folder (which ships Azure/AWS stencils)
+            fuzzy_pool = _stencil_files_under(my_shapes) + self._builtin_stencil_files()
+            for hit in fuzzy_pool:
+                if query.lower() in os.path.basename(hit).lower():
+                    candidates.append(hit)
 
         errors: list[str] = []
         for cand in candidates:
@@ -274,8 +315,10 @@ class VisioClient:
                 errors.append(f"{cand}: {exc}")
         raise VisioMcpError(
             f"Could not open a stencil matching {name_or_path!r}. Tried Visio's "
-            f"search paths and {str(app.MyShapesPath)!r}. If this is an Azure/AWS "
-            "stencil pack, download it and unzip into the My Shapes folder first. "
+            f"search paths, {str(app.MyShapesPath)!r}, and the built-in Visio "
+            "Content folder. Call visio_status to see builtin_cloud_stencils "
+            "(Visio ships Azure/AWS stencils out of the box); for other vendor "
+            "packs, download and unzip into the My Shapes folder. "
             f"Attempts: {errors[:3]}"
         )
 
@@ -316,7 +359,7 @@ class VisioClient:
                     return {"masters": rows, "truncated": True}
         return {"masters": rows, "truncated": False}
 
-    def _find_master(self, master: str, stencil: Optional[str] = None):
+    def _find_master(self, master: str, stencil: Optional[str] = None, _alias_depth: int = 0):
         sources = self._master_sources()
         if stencil is not None:
             sources = [s for s in sources if stencil.lower() in s[0].lower()]
@@ -337,10 +380,23 @@ class VisioClient:
             raise VisioMcpError(
                 f"Master {master!r} is ambiguous — matches {names}. Use the exact name."
             )
+        key = master.strip().lower()
+        if key in C.MASTER_HINTS:
+            raise VisioMcpError(f"No master named {master!r}: {C.MASTER_HINTS[key]}")
+        alias = C.MASTER_ALIASES.get(key)
+        if alias and _alias_depth == 0:
+            try:
+                return self._find_master(alias, stencil, _alias_depth=1)
+            except VisioMcpError:
+                pass  # alias target not in the open stencils either
         suggestions = difflib.get_close_matches(master, all_names, n=5, cutoff=0.4)
         hint = f" Closest matches: {suggestions}." if suggestions else ""
+        alias_hint = (
+            f" This is usually drawn with the {alias!r} master — open the "
+            "stencil that contains it." if alias else ""
+        )
         raise VisioMcpError(
-            f"No master named {master!r} found in the open stencils.{hint} "
+            f"No master named {master!r} found in the open stencils.{alias_hint}{hint} "
             "Call find_masters to browse, or open_stencil to load the stencil "
             "that contains it."
         )
@@ -435,22 +491,26 @@ class VisioClient:
         shape = self._shape_by_id(page, shape_id)
 
         def _apply():
+            # FormulaForceU writes through cell guards — Visio's built-in
+            # container/theme masters guard LineColor/Char.* cells, and plain
+            # FormulaU raises 'Cell is guarded' on them
             if line_pattern is not None:
-                shape.CellsU("LinePattern").ResultIU = C.LINE_PATTERNS[line_pattern]
+                shape.CellsU("LinePattern").FormulaForceU = str(C.LINE_PATTERNS[line_pattern])
             if fill_color is not None:
-                shape.CellsU("FillForegnd").FormulaU = hex_to_rgb_formula(fill_color)
+                shape.CellsU("FillForegnd").FormulaForceU = hex_to_rgb_formula(fill_color)
             if line_color is not None:
-                shape.CellsU("LineColor").FormulaU = hex_to_rgb_formula(line_color)
+                shape.CellsU("LineColor").FormulaForceU = hex_to_rgb_formula(line_color)
             if text_color is not None:
-                shape.CellsU("Char.Color").FormulaU = hex_to_rgb_formula(text_color)
+                shape.CellsU("Char.Color").FormulaForceU = hex_to_rgb_formula(text_color)
             if line_weight_pt is not None:
-                shape.CellsU("LineWeight").FormulaU = f"{line_weight_pt} pt"
+                shape.CellsU("LineWeight").FormulaForceU = f"{line_weight_pt} pt"
             if font_size_pt is not None:
-                shape.CellsU("Char.Size").FormulaU = f"{font_size_pt} pt"
+                shape.CellsU("Char.Size").FormulaForceU = f"{font_size_pt} pt"
             if bold is not None:
-                cell = shape.CellsU("Char.Style")
-                current = int(cell.ResultIU)
-                cell.ResultIU = (current | 1) if bold else (current & ~1)
+                current = int(shape.CellsU("Char.Style").ResultIU)
+                shape.CellsU("Char.Style").FormulaForceU = str(
+                    (current | 1) if bold else (current & ~1)
+                )
 
         self._guard(f"styling shape {shape_id}", _apply)
         return {"shape_id": int(shape.ID), "styled": True}

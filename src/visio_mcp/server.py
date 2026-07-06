@@ -37,9 +37,10 @@ mcp = FastMCP(
         "(VNet/VPC/subnet/trust boundary) with add_container — innermost "
         "containers first. Use drop_text for titles and legends, and dashed "
         "connectors (line_pattern) for control-plane/auth flows. For Azure/"
-        "AWS icons, recent Visio ships built-in Azure/AWS stencils, or open "
-        "stencil packs installed in the My Shapes folder (see "
-        "visio_status.my_shapes_path) and search them with find_masters."
+        "AWS icons, Visio ships built-in cloud stencils — visio_status lists "
+        "them in builtin_cloud_stencils and they open by bare filename (e.g. "
+        "open_stencil('AZURESTORAGE_U.VSSX')); extra vendor packs can go in "
+        "the My Shapes folder. Search open stencils with find_masters."
     ),
 )
 
@@ -65,8 +66,10 @@ def _tool_errors(fn):
 @_tool_errors
 async def visio_status() -> dict:
     """Report Visio state: version, open documents and stencils, active page,
-    and the My Shapes folder path (where Azure/AWS stencil packs belong).
-    Launches Visio if it is not already running. Call this first."""
+    the My Shapes folder path, and the built-in stencil library — including
+    builtin_cloud_stencils, the Azure/AWS stencil files Visio ships with
+    (openable by bare filename, no download needed). Launches Visio if it is
+    not already running. Call this first."""
     return await _worker.run(_client.status)
 
 
@@ -210,8 +213,10 @@ async def style_shape(
     line_pattern: Optional[Literal["solid", "dashed", "dotted", "dash_dot"]] = None,
     page: Optional[str] = None,
 ) -> dict:
-    """Style a shape or connector. Colors are hex like '#0078D4' (Azure blue)
-    or '#FF9900' (AWS orange). Only the provided fields are changed."""
+    """Style a shape, connector, or container. Colors are hex like '#0078D4'
+    (Azure blue) or '#FF9900' (AWS orange). Only the provided fields are
+    changed. Works on containers too: theme-guarded cells are force-
+    overridden, so recoloring a VNet/subscription boundary is supported."""
     return await _worker.run(
         _client.style_shape, shape_id, page, fill_color, line_color,
         text_color, line_weight_pt, font_size_pt, bold, line_pattern,
@@ -349,6 +354,9 @@ async def add_container(
         member_ids: shape_ids to place inside.
         master: Optional container style name from Visio's built-in container
             stencil (defaults to the first available style).
+
+    To recolor the container afterwards (e.g. brand colors per zone), use
+    style_shape on the returned shape_id — theme guards are overridden.
     """
     return await _worker.run(
         _client.add_container, label, member_ids, master, padding_in, page
