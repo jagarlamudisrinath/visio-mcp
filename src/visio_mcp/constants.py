@@ -115,7 +115,12 @@ MASTER_ALIASES: dict[str, str] = {
 
 # Guessed names that are not masters at all -> guidance for the agent.
 MASTER_HINTS: dict[str, str] = {
-    "subnet": "Subnets are drawn as containers, not masters — use add_container.",
+    "subnet": (
+        "Subnets have no Visio master. Draw the boundary with add_container. "
+        "For a header icon on the box, save a labeled image (e.g. 'subnet.svg') "
+        "in the local icon folder (see list_local_icons), then retry "
+        "drop_shape('subnet', ...)."
+    ),
     "vnet": "VNets are drawn as containers, not masters — use add_container.",
     "vpc": "VPCs are drawn as containers, not masters — use add_container.",
     "resource group": "Resource groups are drawn as containers — use add_container.",
